@@ -46,8 +46,9 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
 from pipecat.services.tts_service import (
-    AudioContextTTSService,
+    TextAggregationMode,
     TTSService,
+    WebsocketTTSService,
 )
 from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.tracing.service_decorators import traced_tts
@@ -186,7 +187,7 @@ class PronunciationDictionaryLocator(BaseModel):
 
 @dataclass
 class ElevenLabsTTSSettings(TTSSettings):
-    """Settings for the ElevenLabs WebSocket TTS service.
+    """Settings for ElevenLabsTTSService.
 
     Fields that appear in the WebSocket URL (``voice``, ``model``,
     ``language``) require a full reconnect when changed.  Fields that
@@ -200,9 +201,6 @@ class ElevenLabsTTSSettings(TTSSettings):
         style: Style control for voice expression (0.0 to 1.0).
         use_speaker_boost: Whether to use speaker boost enhancement.
         speed: Voice speed control (0.7 to 1.2).
-        auto_mode: Whether to enable automatic mode optimization.
-        enable_ssml_parsing: Whether to parse SSML tags in text.
-        enable_logging: Whether to enable ElevenLabs logging.
         apply_text_normalization: Text normalization mode ("auto", "on", "off").
     """
 
@@ -211,9 +209,6 @@ class ElevenLabsTTSSettings(TTSSettings):
     style: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     use_speaker_boost: bool | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     speed: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    auto_mode: bool | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    enable_ssml_parsing: bool | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    enable_logging: bool | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     apply_text_normalization: Literal["auto", "on", "off"] | None | _NotGiven = field(
         default_factory=lambda: NOT_GIVEN
     )
@@ -227,12 +222,10 @@ class ElevenLabsTTSSettings(TTSSettings):
         {"stability", "similarity_boost", "style", "use_speaker_boost", "speed"}
     )
 
-    _aliases: ClassVar[Dict[str, str]] = {"voice_id": "voice"}
-
 
 @dataclass
 class ElevenLabsHttpTTSSettings(TTSSettings):
-    """Settings for the ElevenLabs HTTP TTS service.
+    """Settings for ElevenLabsHttpTTSService.
 
     Parameters:
         optimize_streaming_latency: Latency optimization level (0-4).
@@ -253,8 +246,6 @@ class ElevenLabsHttpTTSSettings(TTSSettings):
     apply_text_normalization: Literal["auto", "on", "off"] | None | _NotGiven = field(
         default_factory=lambda: NOT_GIVEN
     )
-
-    _aliases: ClassVar[Dict[str, str]] = {"voice_id": "voice"}
 
 
 def calculate_word_times(
@@ -317,7 +308,7 @@ def calculate_word_times(
     return (word_times, new_partial_word, new_partial_word_start_time)
 
 
-class ElevenLabsTTSService(AudioContextTTSService):
+class ElevenLabsTTSService(WebsocketTTSService):
     """ElevenLabs WebSocket-based TTS service with word timestamps.
 
     Provides real-time text-to-speech using ElevenLabs' WebSocket streaming API.
@@ -325,10 +316,14 @@ class ElevenLabsTTSService(AudioContextTTSService):
     customization options including stability, similarity boost, and speed controls.
     """
 
-    _settings: ElevenLabsTTSSettings
+    Settings = ElevenLabsTTSSettings
+    _settings: Settings
 
     class InputParams(BaseModel):
         """Input parameters for ElevenLabs TTS configuration.
+
+        .. deprecated:: 0.0.105
+            Use ``settings=ElevenLabsTTSService.Settings(...)`` instead.
 
         Parameters:
             language: Language to use for synthesis.
@@ -360,12 +355,18 @@ class ElevenLabsTTSService(AudioContextTTSService):
         self,
         *,
         api_key: str,
-        voice_id: str,
-        model: str = "eleven_turbo_v2_5",
+        voice_id: Optional[str] = None,
+        model: Optional[str] = None,
         url: str = "wss://api.elevenlabs.io",
         sample_rate: Optional[int] = None,
+        auto_mode: bool = True,
+        enable_ssml_parsing: Optional[bool] = None,
+        enable_logging: Optional[bool] = None,
+        pronunciation_dictionary_locators: Optional[List[PronunciationDictionaryLocator]] = None,
         params: Optional[InputParams] = None,
-        aggregate_sentences: Optional[bool] = True,
+        settings: Optional[Settings] = None,
+        text_aggregation_mode: Optional[TextAggregationMode] = None,
+        aggregate_sentences: Optional[bool] = None,
         **kwargs,
     ):
         """Initialize the ElevenLabs TTS service.
@@ -373,17 +374,43 @@ class ElevenLabsTTSService(AudioContextTTSService):
         Args:
             api_key: ElevenLabs API key for authentication.
             voice_id: ID of the voice to use for synthesis.
+
+                .. deprecated:: 0.0.105
+                    Use ``settings=ElevenLabsTTSService.Settings(voice=...)`` instead.
+
             model: TTS model to use (e.g., "eleven_turbo_v2_5").
+
+                .. deprecated:: 0.0.105
+                    Use ``settings=ElevenLabsTTSService.Settings(model=...)`` instead.
+
             url: WebSocket URL for ElevenLabs TTS API.
             sample_rate: Audio sample rate. If None, uses default.
+            auto_mode: Whether to enable automatic mode optimization.
+            enable_ssml_parsing: Whether to parse SSML tags in text.
+            enable_logging: Whether to enable ElevenLabs server-side logging.
+            pronunciation_dictionary_locators: List of pronunciation dictionary
+                locators to use.
             params: Additional input parameters for voice customization.
+
+                .. deprecated:: 0.0.105
+                    Use ``settings=ElevenLabsTTSService.Settings(...)`` instead.
+
+            settings: Runtime-updatable settings. When provided alongside deprecated
+                parameters, ``settings`` values take precedence.
+            text_aggregation_mode: How to aggregate incoming text before synthesis.
             aggregate_sentences: Whether to aggregate sentences within the TTSService.
+
+                .. deprecated:: 0.0.104
+                    Use ``text_aggregation_mode`` instead.
+
             **kwargs: Additional arguments passed to the parent service.
         """
-        # Aggregating sentences still gives cleaner-sounding results and fewer
-        # artifacts than streaming one word at a time. On average, waiting for a
-        # full sentence should only "cost" us 15ms or so with GPT-4o or a Llama
-        # 3 model, and it's worth it for the better audio quality.
+        # By default, we aggregate sentences before sending to TTS. This adds
+        # ~200-300ms of latency per sentence (waiting for the sentence-ending
+        # punctuation token from the LLM). Setting
+        # text_aggregation_mode=TextAggregationMode.TOKEN streams tokens
+        # directly. To use this mode, you must set auto_mode=False. This
+        # eliminates aggregation time, but slows down ElevenLabs.
         #
         # We also don't want to automatically push LLM response text frames,
         # because the context aggregators will add them to the LLM context even
@@ -394,40 +421,82 @@ class ElevenLabsTTSService(AudioContextTTSService):
         # Finally, ElevenLabs doesn't provide information on when the bot stops
         # speaking for a while, so we want the parent class to send TTSStopFrame
         # after a short period not receiving any audio.
-        params = params or ElevenLabsTTSService.InputParams()
+
+        # 1. Initialize default_settings with hardcoded defaults
+        default_settings = self.Settings(
+            model="eleven_turbo_v2_5",
+            voice=None,
+            language=None,
+            stability=None,
+            similarity_boost=None,
+            style=None,
+            use_speaker_boost=None,
+            speed=None,
+            apply_text_normalization=None,
+        )
+
+        # 2. Apply direct init arg overrides (deprecated)
+        if voice_id is not None:
+            self._warn_init_param_moved_to_settings("voice_id", "voice")
+            default_settings.voice = voice_id
+        if model is not None:
+            self._warn_init_param_moved_to_settings("model", "model")
+            default_settings.model = model
+
+        # 3. Apply params overrides — only if settings not provided
+        _pronunciation_dictionary_locators = pronunciation_dictionary_locators
+        if params is not None:
+            self._warn_init_param_moved_to_settings("params")
+            if not settings:
+                if params.language is not None:
+                    default_settings.language = params.language
+                if params.stability is not None:
+                    default_settings.stability = params.stability
+                if params.similarity_boost is not None:
+                    default_settings.similarity_boost = params.similarity_boost
+                if params.style is not None:
+                    default_settings.style = params.style
+                if params.use_speaker_boost is not None:
+                    default_settings.use_speaker_boost = params.use_speaker_boost
+                if params.speed is not None:
+                    default_settings.speed = params.speed
+                if params.auto_mode is not None:
+                    auto_mode = params.auto_mode
+                if params.enable_ssml_parsing is not None:
+                    enable_ssml_parsing = params.enable_ssml_parsing
+                if params.enable_logging is not None:
+                    enable_logging = params.enable_logging
+                if params.apply_text_normalization is not None:
+                    default_settings.apply_text_normalization = params.apply_text_normalization
+                if _pronunciation_dictionary_locators is None:
+                    _pronunciation_dictionary_locators = params.pronunciation_dictionary_locators
+
+        # 4. Apply settings delta (canonical API, always wins)
+        if settings is not None:
+            default_settings.apply_update(settings)
 
         super().__init__(
+            text_aggregation_mode=text_aggregation_mode,
             aggregate_sentences=aggregate_sentences,
             push_text_frames=False,
             push_stop_frames=True,
             pause_frame_processing=True,
-            supports_word_timestamps=True,
             sample_rate=sample_rate,
-            settings=ElevenLabsTTSSettings(
-                model=model,
-                voice=voice_id,
-                language=(
-                    self.language_to_service_language(params.language) if params.language else None
-                ),
-                stability=params.stability,
-                similarity_boost=params.similarity_boost,
-                style=params.style,
-                use_speaker_boost=params.use_speaker_boost,
-                speed=params.speed,
-                auto_mode=str(params.auto_mode).lower(),
-                enable_ssml_parsing=params.enable_ssml_parsing,
-                enable_logging=params.enable_logging,
-                apply_text_normalization=params.apply_text_normalization,
-            ),
+            settings=default_settings,
             **kwargs,
         )
 
         self._api_key = api_key
         self._url = url
 
+        # Init-only WebSocket URL params (not runtime-updatable).
+        self._auto_mode = auto_mode
+        self._enable_ssml_parsing = enable_ssml_parsing
+        self._enable_logging = enable_logging
+
         self._output_format = ""  # initialized in start()
         self._voice_settings = self._set_voice_settings()
-        self._pronunciation_dictionary_locators = params.pronunciation_dictionary_locators
+        self._pronunciation_dictionary_locators = _pronunciation_dictionary_locators
 
         self._cumulative_time = 0
         # Track partial words that span across alignment chunks
@@ -458,30 +527,17 @@ class ElevenLabsTTSService(AudioContextTTSService):
         return language_to_elevenlabs_language(language)
 
     def _set_voice_settings(self):
-        ts = self._settings
-        voice_setting_keys = [
-            "stability",
-            "similarity_boost",
-            "style",
-            "use_speaker_boost",
-            "speed",
-        ]
-        voice_settings = {}
-        for key in voice_setting_keys:
-            val = getattr(ts, key, None)
-            if val is not None:
-                voice_settings[key] = val
-        return voice_settings or None
+        return build_elevenlabs_voice_settings(self._settings)
 
     async def _update_settings(self, delta: TTSSettings) -> dict[str, Any]:
         """Apply a settings delta, reconnecting as needed.
 
         Uses the declarative ``URL_FIELDS`` and ``VOICE_SETTINGS_FIELDS``
-        sets on :class:`ElevenLabsTTSSettings` to decide whether to
+        sets on :class:`ElevenLabsTTSService.Settings` to decide whether to
         reconnect the WebSocket or close the current audio context.
 
         Args:
-            delta: A :class:`TTSSettings` (or ``ElevenLabsTTSSettings``) delta.
+            delta: A :class:`TTSSettings` (or ``ElevenLabsTTSService.Settings``) delta.
 
         Returns:
             Dict mapping changed field names to their previous values.
@@ -494,35 +550,30 @@ class ElevenLabsTTSService(AudioContextTTSService):
         # Rebuild voice settings for next context
         self._voice_settings = self._set_voice_settings()
 
-        url_changed = bool(changed.keys() & ElevenLabsTTSSettings.URL_FIELDS)
-        voice_settings_changed = bool(changed.keys() & ElevenLabsTTSSettings.VOICE_SETTINGS_FIELDS)
+        url_changed = bool(changed.keys() & self.Settings.URL_FIELDS)
+        voice_settings_changed = bool(changed.keys() & self.Settings.VOICE_SETTINGS_FIELDS)
 
         if url_changed:
             logger.debug(
-                f"URL-level setting changed ({changed.keys() & ElevenLabsTTSSettings.URL_FIELDS}), "
+                f"URL-level setting changed ({changed.keys() & self.Settings.URL_FIELDS}), "
                 f"reconnecting WebSocket"
             )
             await self._disconnect()
             await self._connect()
-        elif voice_settings_changed and self.has_active_audio_context():
+        elif voice_settings_changed:
             logger.debug(
-                f"Voice settings changed ({changed.keys() & ElevenLabsTTSSettings.VOICE_SETTINGS_FIELDS}), "
+                f"Voice settings changed ({changed.keys() & self.Settings.VOICE_SETTINGS_FIELDS}), "
                 f"closing current context to apply changes"
             )
-            context_id = self.get_active_audio_context_id()
-            try:
-                if self._websocket:
-                    await self._websocket.send(
-                        json.dumps({"context_id": context_id, "close_context": True})
-                    )
-            except Exception as e:
-                await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
-            self.reset_active_audio_context()
+            audio_contexts = self.get_audio_contexts()
+            if audio_contexts:
+                for ctx_id in audio_contexts:
+                    await self._close_context(ctx_id)
 
         if not url_changed:
             # Reconnect applies all settings; only warn about fields not handled
             # by voice settings or URL changes.
-            handled = ElevenLabsTTSSettings.URL_FIELDS | ElevenLabsTTSSettings.VOICE_SETTINGS_FIELDS
+            handled = self.Settings.URL_FIELDS | self.Settings.VOICE_SETTINGS_FIELDS
             self._warn_unhandled_updated_settings(changed.keys() - handled)
 
         return changed
@@ -555,13 +606,18 @@ class ElevenLabsTTSService(AudioContextTTSService):
         await super().cancel(frame)
         await self._disconnect()
 
-    async def flush_audio(self):
-        """Flush any pending audio and finalize the current context."""
-        context_id = self.get_active_audio_context_id()
-        if not context_id or not self._websocket:
+    async def flush_audio(self, context_id: Optional[str] = None):
+        """Flush any pending audio and finalize the current context.
+
+        Args:
+            context_id: The specific context to flush. If None, falls back to the
+                currently active context.
+        """
+        flush_id = context_id or self.get_active_audio_context_id()
+        if not flush_id or not self._websocket:
             return
         logger.trace(f"{self}: flushing audio")
-        msg = {"context_id": context_id, "flush": True}
+        msg = {"context_id": flush_id, "flush": True}
         await self._websocket.send(json.dumps(msg))
 
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
@@ -610,13 +666,13 @@ class ElevenLabsTTSService(AudioContextTTSService):
             voice_id = self._settings.voice
             model = self._settings.model
             output_format = self._output_format
-            url = f"{self._url}/v1/text-to-speech/{voice_id}/multi-stream-input?model_id={model}&output_format={output_format}&auto_mode={self._settings.auto_mode}"
+            url = f"{self._url}/v1/text-to-speech/{voice_id}/multi-stream-input?model_id={model}&output_format={output_format}&auto_mode={str(self._auto_mode).lower()}"
 
-            if self._settings.enable_ssml_parsing:
-                url += f"&enable_ssml_parsing={self._settings.enable_ssml_parsing}"
+            if self._enable_ssml_parsing:
+                url += f"&enable_ssml_parsing={self._enable_ssml_parsing}"
 
-            if self._settings.enable_logging:
-                url += f"&enable_logging={self._settings.enable_logging}"
+            if self._enable_logging:
+                url += f"&enable_logging={self._enable_logging}"
 
             if self._settings.apply_text_normalization is not None:
                 url += f"&apply_text_normalization={self._settings.apply_text_normalization}"
@@ -648,9 +704,7 @@ class ElevenLabsTTSService(AudioContextTTSService):
 
             if self._websocket:
                 logger.debug("Disconnecting from ElevenLabs")
-                # Close all contexts and the socket
-                if self.has_active_audio_context():
-                    await self._websocket.send(json.dumps({"close_socket": True}))
+                await self._websocket.send(json.dumps({"close_socket": True}))
                 await self._websocket.close()
                 logger.debug("Disconnected from ElevenLabs")
         except Exception as e:
@@ -682,6 +736,7 @@ class ElevenLabsTTSService(AudioContextTTSService):
                 )
             except Exception as e:
                 await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
+        self._cumulative_time = 0.0
         self._partial_word = ""
         self._partial_word_start_time = 0.0
 
@@ -727,9 +782,6 @@ class ElevenLabsTTSService(AudioContextTTSService):
                     continue
 
             if msg.get("audio"):
-                await self.stop_ttfb_metrics()
-                await self.start_word_timestamps()
-
                 audio = base64.b64decode(msg["audio"])
                 frame = TTSAudioRawFrame(audio, self.sample_rate, 1, context_id=received_ctx_id)
                 await self.append_to_audio_context(received_ctx_id, frame)
@@ -790,9 +842,8 @@ class ElevenLabsTTSService(AudioContextTTSService):
                 logger.warning(f"{self} keepalive error: {e}")
                 break
 
-    async def _send_text(self, text: str):
+    async def _send_text(self, text: str, context_id: str):
         """Send text to the WebSocket for synthesis."""
-        context_id = self.get_active_audio_context_id()
         if self._websocket and context_id:
             msg = {"text": text, "context_id": context_id}
             await self._websocket.send(json.dumps(msg))
@@ -815,15 +866,13 @@ class ElevenLabsTTSService(AudioContextTTSService):
                 await self._connect()
 
             try:
-                if not self.has_active_audio_context():
+                if not self.audio_context_available(context_id):
+                    await self.create_audio_context(context_id)
                     await self.start_ttfb_metrics()
                     yield TTSStartedFrame(context_id=context_id)
                     self._cumulative_time = 0
                     self._partial_word = ""
                     self._partial_word_start_time = 0.0
-
-                    if not self.audio_context_available(context_id):
-                        await self.create_audio_context(context_id)
 
                     # Initialize context with voice settings and pronunciation dictionaries
                     msg = {"text": " ", "context_id": context_id}
@@ -837,7 +886,7 @@ class ElevenLabsTTSService(AudioContextTTSService):
                     await self._websocket.send(json.dumps(msg))
                     logger.trace(f"Created new context {context_id}")
 
-                await self._send_text(text)
+                await self._send_text(text, context_id)
                 await self.start_tts_usage_metrics(text)
             except Exception as e:
                 yield TTSStoppedFrame(context_id=context_id)
@@ -856,10 +905,14 @@ class ElevenLabsHttpTTSService(TTSService):
     connection is not required or desired.
     """
 
-    _settings: ElevenLabsHttpTTSSettings
+    Settings = ElevenLabsHttpTTSSettings
+    _settings: Settings
 
     class InputParams(BaseModel):
         """Input parameters for ElevenLabs HTTP TTS configuration.
+
+        .. deprecated:: 0.0.105
+            Use ``settings=ElevenLabsHttpTTSService.Settings(...)`` instead.
 
         Parameters:
             language: Language to use for synthesis.
@@ -887,13 +940,16 @@ class ElevenLabsHttpTTSService(TTSService):
         self,
         *,
         api_key: str,
-        voice_id: str,
+        voice_id: Optional[str] = None,
         aiohttp_session: aiohttp.ClientSession,
-        model: str = "eleven_turbo_v2_5",
+        model: Optional[str] = None,
         base_url: str = "https://api.elevenlabs.io",
         sample_rate: Optional[int] = None,
+        pronunciation_dictionary_locators: Optional[List[PronunciationDictionaryLocator]] = None,
         params: Optional[InputParams] = None,
-        aggregate_sentences: Optional[bool] = True,
+        settings: Optional[Settings] = None,
+        text_aggregation_mode: Optional[TextAggregationMode] = None,
+        aggregate_sentences: Optional[bool] = None,
         **kwargs,
     ):
         """Initialize the ElevenLabs HTTP TTS service.
@@ -901,36 +957,93 @@ class ElevenLabsHttpTTSService(TTSService):
         Args:
             api_key: ElevenLabs API key for authentication.
             voice_id: ID of the voice to use for synthesis.
+
+                .. deprecated:: 0.0.105
+                    Use ``settings=ElevenLabsHttpTTSService.Settings(voice=...)`` instead.
+
             aiohttp_session: aiohttp ClientSession for HTTP requests.
             model: TTS model to use (e.g., "eleven_turbo_v2_5").
+
+                .. deprecated:: 0.0.105
+                    Use ``settings=ElevenLabsHttpTTSService.Settings(model=...)`` instead.
+
             base_url: Base URL for ElevenLabs HTTP API.
             sample_rate: Audio sample rate. If None, uses default.
+            pronunciation_dictionary_locators: List of pronunciation dictionary
+                locators to use.
             params: Additional input parameters for voice customization.
+
+                .. deprecated:: 0.0.105
+                    Use ``settings=ElevenLabsHttpTTSService.Settings(...)`` instead.
+
+            settings: Runtime-updatable settings. When provided alongside deprecated
+                parameters, ``settings`` values take precedence.
+            text_aggregation_mode: How to aggregate incoming text before synthesis.
             aggregate_sentences: Whether to aggregate sentences within the TTSService.
+
+                .. deprecated:: 0.0.104
+                    Use ``text_aggregation_mode`` instead.
+
             **kwargs: Additional arguments passed to the parent service.
         """
-        params = params or ElevenLabsHttpTTSService.InputParams()
+        # 1. Initialize default_settings with hardcoded defaults
+        default_settings = self.Settings(
+            model="eleven_turbo_v2_5",
+            voice=None,
+            language=None,
+            optimize_streaming_latency=None,
+            stability=None,
+            similarity_boost=None,
+            style=None,
+            use_speaker_boost=None,
+            speed=None,
+            apply_text_normalization=None,
+        )
+
+        # 2. Apply direct init arg overrides (deprecated)
+        if voice_id is not None:
+            self._warn_init_param_moved_to_settings("voice_id", "voice")
+            default_settings.voice = voice_id
+        if model is not None:
+            self._warn_init_param_moved_to_settings("model", "model")
+            default_settings.model = model
+
+        # 3. Apply params overrides — only if settings not provided
+        _pronunciation_dictionary_locators = pronunciation_dictionary_locators
+        if params is not None:
+            self._warn_init_param_moved_to_settings("params")
+            if not settings:
+                if params.language is not None:
+                    default_settings.language = params.language
+                if params.optimize_streaming_latency is not None:
+                    default_settings.optimize_streaming_latency = params.optimize_streaming_latency
+                if params.stability is not None:
+                    default_settings.stability = params.stability
+                if params.similarity_boost is not None:
+                    default_settings.similarity_boost = params.similarity_boost
+                if params.style is not None:
+                    default_settings.style = params.style
+                if params.use_speaker_boost is not None:
+                    default_settings.use_speaker_boost = params.use_speaker_boost
+                if params.speed is not None:
+                    default_settings.speed = params.speed
+                if params.apply_text_normalization is not None:
+                    default_settings.apply_text_normalization = params.apply_text_normalization
+                if _pronunciation_dictionary_locators is None:
+                    _pronunciation_dictionary_locators = params.pronunciation_dictionary_locators
+
+        # 4. Apply settings delta (canonical API, always wins)
+        if settings is not None:
+            default_settings.apply_update(settings)
 
         super().__init__(
+            text_aggregation_mode=text_aggregation_mode,
             aggregate_sentences=aggregate_sentences,
             push_text_frames=False,
             push_stop_frames=True,
-            supports_word_timestamps=True,
+            push_start_frame=True,
             sample_rate=sample_rate,
-            settings=ElevenLabsHttpTTSSettings(
-                model=model,
-                voice=voice_id,
-                language=self.language_to_service_language(params.language)
-                if params.language
-                else None,
-                optimize_streaming_latency=params.optimize_streaming_latency,
-                stability=params.stability,
-                similarity_boost=params.similarity_boost,
-                style=params.style,
-                use_speaker_boost=params.use_speaker_boost,
-                speed=params.speed,
-                apply_text_normalization=params.apply_text_normalization,
-            ),
+            settings=default_settings,
             **kwargs,
         )
 
@@ -940,7 +1053,7 @@ class ElevenLabsHttpTTSService(TTSService):
 
         self._output_format = ""  # initialized in start()
         self._voice_settings = self._set_voice_settings()
-        self._pronunciation_dictionary_locators = params.pronunciation_dictionary_locators
+        self._pronunciation_dictionary_locators = _pronunciation_dictionary_locators
 
         # Track cumulative time to properly sequence word timestamps across utterances
         self._cumulative_time = 0
@@ -978,7 +1091,7 @@ class ElevenLabsHttpTTSService(TTSService):
         """Apply a settings delta and rebuild voice settings.
 
         Args:
-            delta: A :class:`TTSSettings` (or ``ElevenLabsHttpTTSSettings``) delta.
+            delta: A :class:`TTSSettings` (or ``ElevenLabsHttpTTSService.Settings``) delta.
 
         Returns:
             Dict mapping changed field names to their previous values.
@@ -1148,8 +1261,6 @@ class ElevenLabsHttpTTSService(TTSService):
             params["optimize_streaming_latency"] = self._settings.optimize_streaming_latency
 
         try:
-            await self.start_ttfb_metrics()
-
             async with self._session.post(
                 url, json=payload, headers=headers, params=params
             ) as response:
@@ -1159,10 +1270,6 @@ class ElevenLabsHttpTTSService(TTSService):
                     return
 
                 await self.start_tts_usage_metrics(text)
-
-                # Start TTS sequence
-                await self.start_word_timestamps()
-                yield TTSStartedFrame(context_id=context_id)
 
                 # Track the duration of this utterance based on the last character's end time
                 utterance_duration = 0
@@ -1229,4 +1336,3 @@ class ElevenLabsHttpTTSService(TTSService):
             yield ErrorFrame(error=f"Unknown error occurred: {e}")
         finally:
             await self.stop_ttfb_metrics()
-            # Let the parent class handle TTSStoppedFrame

@@ -51,8 +51,10 @@ def _get_model_name(service) -> str:
     check all the places we used to store it.
     """
     return (
-        getattr(getattr(service, "_settings", None), "model", None)
-        or getattr(service, "_full_model_name", None)
+        # Some services store an API-response-provided detailed "full" name,
+        # which is distinct from the user-provided model name
+        getattr(service, "_full_model_name", None)
+        or getattr(getattr(service, "_settings", None), "model", None)
         or getattr(service, "model_name", None)
         or getattr(service, "_model_name", None)
         or "unknown"
@@ -135,14 +137,14 @@ def _add_token_usage_to_span(span, token_usage):
             and token_usage["cache_read_input_tokens"] is not None
         ):
             span.set_attribute(
-                "gen_ai.usage.cache_read_input_tokens", token_usage["cache_read_input_tokens"]
+                "gen_ai.usage.cache_read.input_tokens", token_usage["cache_read_input_tokens"]
             )
         if (
             "cache_creation_input_tokens" in token_usage
             and token_usage["cache_creation_input_tokens"] is not None
         ):
             span.set_attribute(
-                "gen_ai.usage.cache_creation_input_tokens",
+                "gen_ai.usage.cache_creation.input_tokens",
                 token_usage["cache_creation_input_tokens"],
             )
         if "reasoning_tokens" in token_usage and token_usage["reasoning_tokens"] is not None:
@@ -157,11 +159,11 @@ def _add_token_usage_to_span(span, token_usage):
         # Add cached token metrics for LLMTokenUsage object
         cache_read_tokens = getattr(token_usage, "cache_read_input_tokens", None)
         if cache_read_tokens is not None:
-            span.set_attribute("gen_ai.usage.cache_read_input_tokens", cache_read_tokens)
+            span.set_attribute("gen_ai.usage.cache_read.input_tokens", cache_read_tokens)
 
         cache_creation_tokens = getattr(token_usage, "cache_creation_input_tokens", None)
         if cache_creation_tokens is not None:
-            span.set_attribute("gen_ai.usage.cache_creation_input_tokens", cache_creation_tokens)
+            span.set_attribute("gen_ai.usage.cache_creation.input_tokens", cache_creation_tokens)
 
         reasoning_tokens = getattr(token_usage, "reasoning_tokens", None)
         if reasoning_tokens is not None:
@@ -219,7 +221,7 @@ def traced_tts(func: Optional[Callable] = None, *, name: Optional[str] = None) -
             tracer = trace.get_tracer("pipecat")
             with tracer.start_as_current_span(span_name, context=parent_context) as span:
                 try:
-                    settings = getattr(self, "_settings", {})
+                    settings = getattr(self, "_settings", None)
                     add_tts_span_attributes(
                         span=span,
                         service_name=service_class_name,
@@ -338,7 +340,7 @@ def traced_stt(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                         )
 
                         # Use settings from the service if available
-                        settings = getattr(self, "_settings", {})
+                        settings = getattr(self, "_settings", None)
 
                         add_stt_span_attributes(
                             span=current_span,
@@ -500,25 +502,48 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
 
                             # Handle system message for different services
                             system_message = None
-                            if hasattr(context, "system"):
+                            if isinstance(context, LLMContext):
+                                # settings.system_instruction takes priority (matches service behavior)
+                                if hasattr(self, "_settings") and getattr(
+                                    self._settings, "system_instruction", None
+                                ):
+                                    system_message = self._settings.system_instruction
+                                else:
+                                    # Fall back to extracting from context messages
+                                    ctx_messages = context.get_messages()
+                                    if ctx_messages:
+                                        first = ctx_messages[0]
+                                        if (
+                                            isinstance(first, dict)
+                                            and first.get("role") == "system"
+                                        ):
+                                            content = first.get("content")
+                                            if isinstance(content, str):
+                                                system_message = content
+                                            elif isinstance(content, list):
+                                                system_message = " ".join(
+                                                    part.get("text", "")
+                                                    for part in content
+                                                    if isinstance(part, dict)
+                                                    and part.get("type") == "text"
+                                                )
+                            elif hasattr(context, "system"):
                                 system_message = context.system
                             elif hasattr(context, "system_message"):
                                 system_message = context.system_message
-                            elif hasattr(self, "_system_instruction"):
-                                system_message = self._system_instruction
 
-                            # Get settings from the service
+                            # Use given_fields() defensively in case a service doesn't
+                            # initialize all settings.
                             params = {}
                             if hasattr(self, "_settings"):
-                                for key, value in self._settings.items():
-                                    if key == "extra":
+                                for key, value in self._settings.given_fields().items():
+                                    # system_instruction is already captured as the
+                                    # "system_instructions" span attribute above.
+                                    if key == "system_instruction":
                                         continue
-                                    # Add value directly if it's a basic type
                                     if isinstance(value, (int, float, bool, str)):
                                         params[key] = value
-                                    elif value is None or (
-                                        hasattr(value, "__name__") and value.__name__ == "NOT_GIVEN"
-                                    ):
+                                    elif value is None:
                                         params[key] = "NOT_GIVEN"
 
                             # Add all available attributes to the span
@@ -536,7 +561,7 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                                 attribute_kwargs["tools"] = serialized_tools
                                 attribute_kwargs["tool_count"] = tool_count
                             if system_message:
-                                attribute_kwargs["system"] = system_message
+                                attribute_kwargs["system_instructions"] = system_message
 
                             # Add all gathered attributes to the span
                             add_llm_span_attributes(span=current_span, **attribute_kwargs)
@@ -627,12 +652,12 @@ def traced_gemini_live(operation: str) -> Callable:
                         model_name = _get_model_name(self)
                         voice_id = getattr(self, "_voice_id", None)
                         language_code = getattr(self, "_language_code", None)
-                        settings = getattr(self, "_settings", {})
+                        settings = getattr(self, "_settings", None)
 
                         # Get modalities if available
                         modalities = None
-                        if hasattr(self, "_settings") and "modalities" in self._settings:
-                            modality_obj = self._settings["modalities"]
+                        if settings and hasattr(settings, "modalities"):
+                            modality_obj = settings.modalities
                             if hasattr(modality_obj, "value"):
                                 modalities = modality_obj.value
                             else:

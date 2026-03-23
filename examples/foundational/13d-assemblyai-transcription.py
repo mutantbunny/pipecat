@@ -49,6 +49,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     stt = AssemblyAISTTService(
         api_key=os.getenv("ASSEMBLYAI_API_KEY"),
+        settings=AssemblyAISTTService.Settings(
+            model="u3-rt-pro",
+        ),
     )
 
     tl = TranscriptionLogger()

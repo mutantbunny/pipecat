@@ -155,6 +155,26 @@ class TestLLMUserAggregator(unittest.IsolatedAsyncioTestCase):
         )
         assert context.messages[0]["content"] == "Hi there!"
 
+    async def test_llm_messages_update_does_not_inject_turn_completion_into_context(self):
+        context = LLMContext()
+        params = LLMUserAggregatorParams(filter_incomplete_user_turns=True)
+        pipeline = Pipeline([LLMUserAggregator(context, params=params)])
+
+        new_messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello!"},
+        ]
+        frames_to_send = [LLMMessagesUpdateFrame(messages=new_messages)]
+        await run_test(
+            pipeline,
+            frames_to_send=frames_to_send,
+        )
+        # Turn completion instructions are now set via system_instruction on the
+        # LLM service, not injected into context messages.
+        assert len(context.messages) == 2
+        assert context.messages[0]["content"] == "You are a helpful assistant."
+        assert context.messages[1]["content"] == "Hello!"
+
     async def test_default_user_turn_strategies(self):
         context = LLMContext()
         user_aggregator = LLMUserAggregator(

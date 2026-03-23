@@ -150,8 +150,9 @@ class BaseInputTransport(FrameProcessor):
             with warnings.catch_warnings():
                 warnings.simplefilter("always")
                 warnings.warn(
-                    "Parameter 'vad_analyzer' is deprecated, use `LLMUserAggregator`'s new "
-                    "`vad_analyzer` parameter instead.",
+                    "Parameter 'vad_analyzer' is deprecated. Use `LLMUserAggregator`'s "
+                    "`vad_analyzer` parameter, or `VADProcessor` if no `LLMUserAggregator` "
+                    "is needed.",
                     DeprecationWarning,
                 )
 
@@ -558,7 +559,7 @@ class BaseInputTransport(FrameProcessor):
 
             # Make sure we notify about interruptions quickly out-of-band.
             if should_push_immediate_interruption and self._allow_interruptions:
-                await self.push_interruption_task_frame_and_wait()
+                await self.broadcast_interruption()
             elif self.interruption_strategies and self._bot_speaking:
                 logger.debug(
                     "User started speaking while bot is speaking with interruption config - "

@@ -32,7 +32,12 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.sarvam._sdk import sdk_headers
-from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven, is_given
+from pipecat.services.settings import (
+    NOT_GIVEN,
+    STTSettings,
+    _NotGiven,
+    is_given,
+)
 from pipecat.services.stt_latency import SARVAM_TTFS_P99
 from pipecat.services.stt_service import STTService
 from pipecat.transcriptions.language import Language, resolve_language
@@ -133,17 +138,16 @@ MODEL_CONFIGS: Dict[str, ModelConfig] = {
 
 @dataclass
 class SarvamSTTSettings(STTSettings):
-    """Settings for the Sarvam STT service.
+    """Settings for SarvamSTTService.
 
     Parameters:
-        prompt: Optional prompt to guide transcription/translation style.
-        mode: Mode of operation (transcribe, translate, verbatim, etc.).
+        prompt: Optional prompt to guide transcription/translation style/context.
+            Only applicable to models that support prompts (e.g., saaras:v2.5).
         vad_signals: Enable VAD signals in response.
         high_vad_sensitivity: Enable high VAD sensitivity.
     """
 
     prompt: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    mode: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     vad_signals: bool | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     high_vad_sensitivity: bool | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
@@ -166,10 +170,14 @@ class SarvamSTTService(STTService):
             ...
     """
 
-    _settings: SarvamSTTSettings
+    Settings = SarvamSTTSettings
+    _settings: Settings
 
     class InputParams(BaseModel):
         """Configuration parameters for Sarvam STT service.
+
+        .. deprecated:: 0.0.105
+            Use ``settings=SarvamSTTService.Settings(...)`` instead.
 
         Parameters:
             language: Target language for transcription.
@@ -194,10 +202,14 @@ class SarvamSTTService(STTService):
         self,
         *,
         api_key: str,
-        model: str = "saarika:v2.5",
+        model: Optional[str] = None,
+        mode: Optional[
+            Literal["transcribe", "translate", "verbatim", "translit", "codemix"]
+        ] = None,
         sample_rate: Optional[int] = None,
         input_audio_codec: str = "wav",
         params: Optional[InputParams] = None,
+        settings: Optional[Settings] = None,
         ttfs_p99_latency: Optional[float] = SARVAM_TTFS_P99,
         keepalive_timeout: Optional[float] = None,
         keepalive_interval: float = 5.0,
@@ -207,13 +219,23 @@ class SarvamSTTService(STTService):
 
         Args:
             api_key: Sarvam API key for authentication.
-            model: Sarvam model to use for transcription. Allowed values:
-                - "saarika:v2.5": Standard STT model
-                - "saaras:v2.5": STT-Translate model (auto-detects language, supports prompts)
-                - "saaras:v3": Advanced STT model (supports mode)
+            model: Sarvam model to use for transcription.
+
+                .. deprecated:: 0.0.105
+                    Use ``settings=SarvamSTTService.Settings(model=...)`` instead.
+
+            mode: Mode of operation. Options: transcribe, translate, verbatim,
+                translit, codemix. Only applicable to models that support it
+                (e.g., saaras:v3). Defaults to the model's default mode.
             sample_rate: Audio sample rate. Defaults to 16000 if not specified.
             input_audio_codec: Audio codec/format of the input file. Defaults to "wav".
             params: Configuration parameters for Sarvam STT service.
+
+                .. deprecated:: 0.0.105
+                    Use ``settings=SarvamSTTService.Settings(...)`` instead.
+
+            settings: Runtime-updatable settings. When provided alongside deprecated
+                parameters, ``settings`` values take precedence.
             ttfs_p99_latency: P99 latency from speech end to final transcript in seconds.
                 Override for your deployment. See https://github.com/pipecat-ai/stt-benchmark
             keepalive_timeout: Seconds of no audio before sending silence to keep the
@@ -221,65 +243,85 @@ class SarvamSTTService(STTService):
             keepalive_interval: Seconds between idle checks when keepalive is enabled.
             **kwargs: Additional arguments passed to the parent STTService.
         """
-        params = params or SarvamSTTService.InputParams()
+        # --- 1. Hardcoded defaults ---
+        default_settings = self.Settings(
+            model="saarika:v2.5",
+            language=None,
+            prompt=None,
+            vad_signals=None,
+            high_vad_sensitivity=None,
+        )
 
-        # Get model configuration (validates model exists)
-        if model not in MODEL_CONFIGS:
+        # --- 2. Deprecated direct-arg overrides ---
+        if model is not None:
+            self._warn_init_param_moved_to_settings("model", "model")
+            default_settings.model = model
+
+        # --- 3. Deprecated params overrides ---
+        if params is not None:
+            self._warn_init_param_moved_to_settings("params")
+            if not settings:
+                default_settings.language = params.language
+                default_settings.prompt = params.prompt
+                if params.mode is not None:
+                    mode = params.mode
+                default_settings.vad_signals = params.vad_signals
+                default_settings.high_vad_sensitivity = params.high_vad_sensitivity
+
+        # --- 4. Settings delta (canonical API, always wins) ---
+        if settings is not None:
+            default_settings.apply_update(settings)
+
+        # Resolve model config and validate (after all overrides)
+        resolved_model = default_settings.model
+        if resolved_model not in MODEL_CONFIGS:
             allowed = ", ".join(sorted(MODEL_CONFIGS.keys()))
-            raise ValueError(f"Unsupported model '{model}'. Allowed values: {allowed}.")
+            raise ValueError(f"Unsupported model '{resolved_model}'. Allowed values: {allowed}.")
 
-        self._config = MODEL_CONFIGS[model]
+        self._config = MODEL_CONFIGS[resolved_model]
 
         # Validate parameters against model capabilities
-        if params.prompt is not None and not self._config.supports_prompt:
-            raise ValueError(f"Model '{model}' does not support prompt parameter.")
-        if params.mode is not None and not self._config.supports_mode:
-            raise ValueError(f"Model '{model}' does not support mode parameter.")
-        if params.language is not None and not self._config.supports_language:
+        if default_settings.prompt is not None and not self._config.supports_prompt:
+            raise ValueError(f"Model '{resolved_model}' does not support prompt parameter.")
+        if mode is not None and not self._config.supports_mode:
+            raise ValueError(f"Model '{resolved_model}' does not support mode parameter.")
+        if default_settings.language is not None and not self._config.supports_language:
             raise ValueError(
-                f"Model '{model}' does not support language parameter (auto-detects language)."
+                f"Model '{resolved_model}' does not support language parameter (auto-detects language)."
             )
 
         # Resolve mode default from model config
-        mode = params.mode if params.mode is not None else self._config.default_mode
+        if mode is None:
+            mode = self._config.default_mode
 
         super().__init__(
             sample_rate=sample_rate,
             ttfs_p99_latency=ttfs_p99_latency,
             keepalive_timeout=keepalive_timeout,
             keepalive_interval=keepalive_interval,
-            settings=SarvamSTTSettings(
-                model=model,
-                language=params.language,
-                prompt=params.prompt,
-                mode=mode,
-                vad_signals=params.vad_signals,
-                high_vad_sensitivity=params.high_vad_sensitivity,
-            ),
+            settings=default_settings,
             **kwargs,
         )
 
         self._api_key = api_key
+
+        # Init-only connection config (not runtime-updatable)
+        self._mode = mode
 
         # Store connection parameters
         self._input_audio_codec = input_audio_codec
 
         # Initialize Sarvam SDK client
         self._sdk_headers = sdk_headers()
-        # NOTE: We avoid passing non-standard kwargs here because different sarvamai
-        # versions expose different constructor signatures (static type checkers
-        # complain otherwise). We instead inject headers best-effort below.
-        self._sarvam_client = AsyncSarvamAI(api_subscription_key=api_key)
-        for attr in ("default_headers", "_default_headers", "headers", "_headers"):
-            d = getattr(self._sarvam_client, attr, None)
-            if isinstance(d, dict):
-                d.update(self._sdk_headers)
-                break
+        # Pass Pipecat SDK headers directly at client construction time so they are
+        # merged by the Sarvam SDK's client wrapper and consistently applied to
+        # WebSocket handshake requests.
+        self._sarvam_client = AsyncSarvamAI(api_subscription_key=api_key, headers=self._sdk_headers)
         self._websocket_context = None
         self._socket_client = None
         self._receive_task = None
 
-        if params.vad_signals:
+        if default_settings.vad_signals:
             self._register_event_handler("on_speech_started")
             self._register_event_handler("on_speech_stopped")
             self._register_event_handler("on_utterance_end")
@@ -331,7 +373,7 @@ class SarvamSTTService(STTService):
         """Apply a settings delta, validate, sync state, and reconnect.
 
         Args:
-            delta: A :class:`STTSettings` (or ``SarvamSTTSettings``) delta.
+            delta: A :class:`STTSettings` (or ``SarvamSTTService.Settings``) delta.
 
         Returns:
             Dict mapping changed field names to their previous values.
@@ -346,38 +388,31 @@ class SarvamSTTService(STTService):
                     f"Model '{self._settings.model}' does not support language parameter "
                     "(auto-detects language)."
                 )
-
-        if isinstance(delta, SarvamSTTSettings):
-            if is_given(delta.prompt) and delta.prompt is not None:
-                if not self._config.supports_prompt:
-                    raise ValueError(
-                        f"Model '{self._settings.model}' does not support prompt parameter."
-                    )
-            if is_given(delta.mode) and delta.mode is not None:
-                if not self._config.supports_mode:
-                    raise ValueError(
-                        f"Model '{self._settings.model}' does not support mode parameter."
-                    )
+        if isinstance(delta, self.Settings) and is_given(delta.prompt) and delta.prompt is not None:
+            if not self._config.supports_prompt:
+                raise ValueError(
+                    f"Model '{self._settings.model}' does not support prompt parameter."
+                )
 
         changed = await super()._update_settings(delta)
 
-        # TODO: someday we could reconnect here to apply updated settings.
-        # Code might look something like the below:
-        # if not changed:
-        #     return changed
+        # Language and prompt are WebSocket connect-time parameters; reconnect to apply.
+        reconnect_fields = {"language", "prompt"}
+        if changed.keys() & reconnect_fields:
+            await self._disconnect()
+            await self._connect()
 
-        # await self._disconnect()
-        # await self._connect()
-
-        self._warn_unhandled_updated_settings(changed)
+        unhandled = {k: v for k, v in changed.items() if k not in reconnect_fields}
+        if unhandled:
+            self._warn_unhandled_updated_settings(unhandled)
 
         return changed
 
     async def set_prompt(self, prompt: Optional[str]):
         """Set the transcription/translation prompt and reconnect.
 
-        .. deprecated::
-            Use ``STTUpdateSettingsFrame(SarvamSTTSettings(prompt=...))`` instead.
+        .. deprecated:: 0.0.104
+            Use ``STTUpdateSettingsFrame(SarvamSTTService.Settings(prompt=...))`` instead.
 
         Args:
             prompt: Prompt text to guide transcription/translation style/context.
@@ -390,7 +425,7 @@ class SarvamSTTService(STTService):
             warnings.simplefilter("always")
             warnings.warn(
                 f"{self.__class__.__name__}.set_prompt() is deprecated. "
-                "Use STTUpdateSettingsFrame(SarvamSTTSettings(prompt=...)) instead.",
+                "Use STTUpdateSettingsFrame(self.Settings(prompt=...)) instead.",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -445,7 +480,6 @@ class SarvamSTTService(STTService):
             Frame: None (transcription results come via WebSocket callbacks).
         """
         if not self._socket_client:
-            logger.warning("WebSocket not connected, cannot process audio")
             yield None
             return
 
@@ -508,8 +542,8 @@ class SarvamSTTService(STTService):
                 connect_kwargs["language_code"] = language_string
 
             # Add mode for models that support it
-            if self._config.supports_mode and self._settings.mode is not None:
-                connect_kwargs["mode"] = self._settings.mode
+            if self._config.supports_mode and self._mode is not None:
+                connect_kwargs["mode"] = self._mode
 
             # Prompt support differs across sarvamai versions. Prefer connect-time prompt
             # when available and gracefully degrade if the SDK doesn't accept it.
@@ -517,20 +551,26 @@ class SarvamSTTService(STTService):
                 connect_kwargs["prompt"] = self._settings.prompt
 
             def _connect_with_sdk_headers(connect_fn, **kwargs):
-                # Different SDK versions may use different kwarg names.
                 # If prompt is unsupported at connect-time, retry without it.
+                # Headers are supplied through request_options because this is a
+                # documented SDK parameter that survives SDK signature changes.
+                request_options = {"additional_headers": self._sdk_headers}
+
                 attempts = [kwargs]
                 if "prompt" in kwargs:
                     attempts.append({k: v for k, v in kwargs.items() if k != "prompt"})
 
                 last_type_error = None
                 for attempt_kwargs in attempts:
-                    for header_kw in ("headers", "additional_headers", "extra_headers"):
-                        try:
-                            return connect_fn(**attempt_kwargs, **{header_kw: self._sdk_headers})
-                        except TypeError as e:
-                            last_type_error = e
                     try:
+                        return connect_fn(
+                            **attempt_kwargs,
+                            request_options=request_options,
+                        )
+                    except TypeError as e:
+                        last_type_error = e
+                    try:
+                        # Fallback for SDK builds that don't expose request_options.
                         return connect_fn(**attempt_kwargs)
                     except TypeError as e:
                         last_type_error = e
@@ -592,18 +632,22 @@ class SarvamSTTService(STTService):
             await self.cancel_task(self._receive_task)
             self._receive_task = None
 
-        if self._websocket_context and self._socket_client:
+        # Clear references first to prevent run_stt from sending audio
+        # during the close handshake.
+        socket_client = self._socket_client
+        websocket_context = self._websocket_context
+        self._socket_client = None
+        self._websocket_context = None
+
+        if websocket_context and socket_client:
             try:
-                # Exit the async context manager
-                await self._websocket_context.__aexit__(None, None, None)
+                await websocket_context.__aexit__(None, None, None)
             except Exception as e:
                 await self.push_error(
                     error_msg=f"Error closing WebSocket connection: {e}", exception=e
                 )
             finally:
                 logger.debug("Disconnected from Sarvam WebSocket")
-                self._socket_client = None
-                self._websocket_context = None
 
     async def _receive_task_handler(self):
         """Handle incoming messages from Sarvam WebSocket.
@@ -643,7 +687,7 @@ class SarvamSTTService(STTService):
                     logger.debug("User started speaking")
                     await self._call_event_handler("on_speech_started")
                     await self.broadcast_frame(UserStartedSpeakingFrame)
-                    await self.push_interruption_task_frame_and_wait()
+                    await self.broadcast_interruption()
 
                 elif signal == "END_SPEECH":
                     logger.debug("User stopped speaking")
