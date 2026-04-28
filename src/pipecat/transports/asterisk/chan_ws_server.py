@@ -385,11 +385,30 @@ class AsteriskWSServerOutputTransport(BaseOutputTransport):
         if isinstance(frame, InterruptionFrame):
             await self._flush_buffers()
 
-        elif (
-            isinstance(frame, InputTransportMessageFrame)
-            and frame.message.get("event", None) == "MEDIA_START"
-        ):
-            await self._handle_media_start(frame.message)
+        elif isinstance(frame, InputTransportMessageFrame):
+            event = frame.message.get("event", None)
+            if event == "MEDIA_START":
+                await self._handle_media_start(frame.message)
+            elif event == "MEDIA_XOFF":
+                await self._handle_media_xoff()
+            elif event == "MEDIA_XON":
+                await self._handle_media_xon()
+
+    async def _handle_media_xoff(self):
+        """Handle MEDIA_XOFF: Asterisk's buffer is full, pause sending."""
+        logger.debug(f"{self} XOFF received, pausing buffer consumer")
+        self._remote_audio_buffer_is_full = True
+        self._audio_buffer_consumer_can_send.clear()
+
+    async def _handle_media_xon(self):
+        """Handle MEDIA_XON: Asterisk's buffer has space, resume sending."""
+        logger.debug(f"{self} XON received, resuming buffer consumer")
+        self._remote_audio_buffer_is_full = False
+        # Reset our estimated remote buffer counter since Asterisk just told us
+        # there is space — its signal is ground truth, replacing our drift-prone estimate.
+        self._remote_audio_buffer_bytes = 0
+        if not self._audio_buffer.empty():
+            self._audio_buffer_consumer_can_send.set()
 
     async def send_message(
         self, frame: OutputTransportMessageFrame | OutputTransportMessageUrgentFrame
@@ -514,49 +533,48 @@ class AsteriskWSServerOutputTransport(BaseOutputTransport):
                 return False
 
     async def _buffer_consumer(self):
-        """Consume frames from the local buffer and send them to Asterisk."""
-        # Check if we need to fill up the initial jitter buffer before stat sending audio to websocket
-        if self._params.initial_jitter_buffer_ms > 0:
-            # Wait till the initial jitter buffer is filled
-            while not self._initial_jitter_buffer_is_filled:
-                if self._audio_buffer_bytes_buffered < self._initial_jitter_buffer_bytes:
-                    await asyncio.sleep(0.02)  # Avoid busy waiting
-                else:
-                    self._initial_jitter_buffer_is_filled = True
-                    logger.debug(
-                        f"{self} Initial jitter buffer filled, starting to send audio frames"
-                    )
+        """Consume frames from the local buffer and send them to Asterisk.
 
-        # Allow sending data now
-        self._audio_buffer_consumer_can_send.set()
-
-        # Start consuming from the buffer
-        # Read from the buffer and send to websocket if possible
+        The consumer waits for the initial jitter buffer to fill before sending.
+        After an interruption, _flush_buffers resets the jitter buffer state so
+        the consumer re-fills it before the next response starts playing.
+        """
         while True:
-            # Wait until we have date in local buffer and space in remote buffer (to avoid overfilling remote buffer and busy waiting)
-            await self._audio_buffer_consumer_can_send.wait()
+            # Wait for jitter buffer to fill before sending (re-runs after each flush)
+            if self._params.initial_jitter_buffer_ms > 0:
+                while not self._initial_jitter_buffer_is_filled:
+                    if self._audio_buffer_bytes_buffered < self._initial_jitter_buffer_bytes:
+                        await asyncio.sleep(0.02)  # Avoid busy waiting
+                    else:
+                        self._initial_jitter_buffer_is_filled = True
+                        logger.debug(
+                            f"{self} Initial jitter buffer filled, starting to send audio frames"
+                        )
 
-            payload = await self._audio_buffer.get()
-            logger.trace(f"{self} sending buffered data of size {len(payload)} bytes")
+            # Allow sending data now
+            self._audio_buffer_consumer_can_send.set()
 
-            try:
-                # Send the data to websocket
-                await self._websocket.send(payload)
+            # Consume from the buffer and send to Asterisk
+            # The _buffer_state_monitor + XOFF/XON handle overflow protection
+            while self._initial_jitter_buffer_is_filled:
+                await self._audio_buffer_consumer_can_send.wait()
 
-                # Update the remote audio buffer counter
-                self._remote_audio_buffer_bytes = self._remote_audio_buffer_bytes + len(payload)
+                payload = await self._audio_buffer.get()
+                logger.trace(f"{self} sending buffered data of size {len(payload)} bytes")
 
-                # Check if remote buffer is full now
-                if self._remote_audio_buffer_bytes >= self._max_remote_audio_buffer_bytes:
-                    self._remote_audio_buffer_is_full = True
-                    # Pause the buffer consumer until remote buffer has space again
-                    self._audio_buffer_consumer_can_send.clear()
-                    logger.debug(f"{self} remote audio buffer is full, pausing buffer consumer")
-            except Exception as e:
-                logger.error(
-                    f"{self} exception sending buffered data: {e.__class__.__name__} ({e})"
-                )
-            self._audio_buffer.task_done()
+                try:
+                    await self._websocket.send(payload)
+                    self._remote_audio_buffer_bytes += len(payload)
+
+                    if self._remote_audio_buffer_bytes >= self._max_remote_audio_buffer_bytes:
+                        self._remote_audio_buffer_is_full = True
+                        self._audio_buffer_consumer_can_send.clear()
+                        logger.debug(f"{self} remote audio buffer is full, pausing buffer consumer")
+                except Exception as e:
+                    logger.error(
+                        f"{self} exception sending buffered data: {e.__class__.__name__} ({e})"
+                    )
+                self._audio_buffer.task_done()
 
     async def _buffer_state_monitor(self):
         """Monitor the local and the remote audio buffers state."""
@@ -634,6 +652,9 @@ class AsteriskWSServerOutputTransport(BaseOutputTransport):
     async def _flush_buffers(self):
         await self._flush_audio_buffer()
         await self._flush_remote_audio_buffer()
+        # Reset jitter buffer state so the consumer re-fills it for the next response
+        self._initial_jitter_buffer_is_filled = False
+        self._audio_buffer_bytes_buffered = 0
 
     async def _terminate(self, gracefully: bool = False):
         """Terminate the output transport.

@@ -166,15 +166,14 @@ class AsteriskWsFrameSerializer(FrameSerializer):
         The app should then pause sending media. Any media sent after this has a high probability of being dropped.
         Asterisk buffer is ~1000 frames by 20ms (160 bytes for ulaw/alaw at 8000Hz), so it's ~20 seconds of audio or 160KB,
         but the messages is sent when the buffer reaches the high water mark of ~900 frames.
-        Currently, we don't have flow control implemented yet, so we just log the event.
 
         Args:
             message: The dictionary representing of the MEDIA_XOFF event message from Asterisk.
         """
         logger.info(
-            f"Received MEDIA_XOFF event from Asterisk: {message}. Oops, we don't have flow control implemented yet, probably Asterisk will drop the following audio frames."
+            f"Received MEDIA_XOFF event from Asterisk: {message}. Pausing audio send."
         )
-        return None
+        return InputTransportMessageFrame(message=message)
 
     def _handle_media_xon(self, message: dict):
         """MEDIA_XON event handler.
@@ -186,9 +185,9 @@ class AsteriskWsFrameSerializer(FrameSerializer):
             message: The dictionary representing of the MEDIA_XON event message from Asterisk.
         """
         logger.info(
-            f"Received MEDIA_XON event from Asterisk: {message}. Asterisk audio buffer is ready to receive audio again."
+            f"Received MEDIA_XON event from Asterisk: {message}. Resuming audio send."
         )
-        return None
+        return InputTransportMessageFrame(message=message)
 
     def _handle_dtmf_end(self, message: dict) -> Optional[InputDTMFFrame]:
         """DTMF_END event handler.
