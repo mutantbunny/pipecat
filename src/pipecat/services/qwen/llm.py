@@ -7,7 +7,6 @@
 """Qwen LLM service implementation using OpenAI-compatible interface."""
 
 from dataclasses import dataclass
-from typing import Optional
 
 from loguru import logger
 
@@ -29,6 +28,10 @@ class QwenLLMService(OpenAILLMService):
     maintaining full compatibility with OpenAI's interface and functionality.
     """
 
+    # Qwen doesn't support the "developer" message role.
+    # This value is used by BaseOpenAILLMService when calling the adapter.
+    supports_developer_role = False
+
     Settings = QwenLLMSettings
     _settings: Settings
 
@@ -37,8 +40,8 @@ class QwenLLMService(OpenAILLMService):
         *,
         api_key: str,
         base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-        model: Optional[str] = None,
-        settings: Optional[Settings] = None,
+        model: str | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Qwen LLM service.

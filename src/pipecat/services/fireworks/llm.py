@@ -7,7 +7,6 @@
 """Fireworks AI service implementation using OpenAI-compatible interface."""
 
 from dataclasses import dataclass
-from typing import Optional
 
 from loguru import logger
 
@@ -37,9 +36,9 @@ class FireworksLLMService(OpenAILLMService):
         self,
         *,
         api_key: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         base_url: str = "https://api.fireworks.ai/inference/v1",
-        settings: Optional[Settings] = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Fireworks LLM service.
@@ -114,16 +113,5 @@ class FireworksLLMService(OpenAILLMService):
         params.update(params_from_context)
 
         params.update(self._settings.extra)
-
-        # Prepend system instruction if set
-        if self._settings.system_instruction:
-            messages = params.get("messages", [])
-            if messages and messages[0].get("role") == "system":
-                logger.warning(
-                    f"{self}: Both system_instruction and an initial system message in context are set. This may be unintended."
-                )
-            params["messages"] = [
-                {"role": "system", "content": self._settings.system_instruction}
-            ] + messages
 
         return params

@@ -28,7 +28,6 @@ the messages are sent to Perplexity's API.
 """
 
 import copy
-from typing import List
 
 from openai.types.chat import ChatCompletionMessageParam
 
@@ -45,27 +44,41 @@ class PerplexityLLMAdapter(OpenAILLMAdapter):
     no non-initial system messages, last message must be user/tool).
 
     The transformations are applied in ``get_llm_invocation_params`` after the
-    parent adapter extracts messages from the LLM context, and before
-    ``build_chat_completion_params`` prepends ``system_instruction``.
+    parent adapter extracts messages from the LLM context (including any
+    ``system_instruction`` prepend).
     """
 
-    def get_llm_invocation_params(self, context: LLMContext) -> OpenAILLMInvocationParams:
+    def get_llm_invocation_params(
+        self,
+        context: LLMContext,
+        *,
+        system_instruction: str | None = None,
+        convert_developer_to_user: bool,
+    ) -> OpenAILLMInvocationParams:
         """Get OpenAI-compatible invocation parameters with Perplexity message fixes applied.
 
         Args:
             context: The LLM context containing messages, tools, etc.
+            system_instruction: Optional system instruction from service settings
+                or ``run_inference``. Forwarded to the parent adapter.
+            convert_developer_to_user: If True, convert "developer"-role messages
+                to "user"-role messages. Forwarded to the parent adapter.
 
         Returns:
             Dictionary of parameters for Perplexity's ChatCompletion API, with
             messages transformed to satisfy Perplexity's constraints.
         """
-        params = super().get_llm_invocation_params(context)
+        params = super().get_llm_invocation_params(
+            context,
+            system_instruction=system_instruction,
+            convert_developer_to_user=convert_developer_to_user,
+        )
         params["messages"] = self._transform_messages(list(params["messages"]))
         return params
 
     def _transform_messages(
-        self, messages: List[ChatCompletionMessageParam]
-    ) -> List[ChatCompletionMessageParam]:
+        self, messages: list[ChatCompletionMessageParam]
+    ) -> list[ChatCompletionMessageParam]:
         """Transform messages to satisfy Perplexity's API constraints.
 
         Applies three transformation steps in order:
@@ -104,6 +117,9 @@ class PerplexityLLMAdapter(OpenAILLMAdapter):
             return messages
 
         messages = copy.deepcopy(messages)
+
+        # Note: "developer" → "user" conversion is handled by the parent adapter
+        # via the convert_developer_to_user parameter.
 
         # Step 1: Convert non-initial system messages to "user".
         # Perplexity allows system messages at the start, but rejects them

@@ -9,7 +9,7 @@
 import copy
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, TypedDict
+from typing import Any, TypedDict, TypeGuard, TypeVar
 
 from anthropic import NOT_GIVEN, NotGiven
 from anthropic.types.message_param import MessageParam
@@ -26,13 +26,36 @@ from pipecat.processors.aggregators.llm_context import (
     LLMStandardMessage,
 )
 
+_T = TypeVar("_T")
+
+
+def is_given(value: _T | NotGiven) -> TypeGuard[_T]:
+    """Check whether a value was explicitly provided.
+
+    Typically used when checking whether a parameter or field typed with
+    Anthropic's ``NotGiven`` was set::
+
+        if is_given(system):
+            ...
+
+    Also acts as a type guard: inside a true branch, the value is narrowed
+    to exclude ``NotGiven`` (e.g. ``str | NotGiven`` becomes ``str``).
+
+    Args:
+        value: The value to check.
+
+    Returns:
+        ``True`` if *value* is anything other than ``NOT_GIVEN``.
+    """
+    return not isinstance(value, NotGiven)
+
 
 class AnthropicLLMInvocationParams(TypedDict):
     """Context-based parameters for invoking Anthropic's LLM API."""
 
     system: str | NotGiven
-    messages: List[MessageParam]
-    tools: List[ToolUnionParam]
+    messages: list[MessageParam]
+    tools: list[ToolUnionParam]
 
 
 class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
@@ -48,30 +71,42 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
         return "anthropic"
 
     def get_llm_invocation_params(
-        self, context: LLMContext, enable_prompt_caching: bool
+        self,
+        context: LLMContext,
+        enable_prompt_caching: bool,
+        system_instruction: str | None = None,
     ) -> AnthropicLLMInvocationParams:
         """Get Anthropic-specific LLM invocation parameters from a universal LLM context.
 
         Args:
             context: The LLM context containing messages, tools, etc.
             enable_prompt_caching: Whether prompt caching should be enabled.
+            system_instruction: Optional system instruction from service settings
+                or ``run_inference``.
 
         Returns:
             Dictionary of parameters for invoking Anthropic's LLM API.
         """
-        messages = self._from_universal_context_messages(self.get_messages(context))
+        converted = self._from_universal_context_messages(
+            self.get_messages(context), system_instruction=system_instruction
+        )
+        system = self._resolve_system_instruction(
+            converted.system if is_given(converted.system) else None,
+            system_instruction,
+            discard_context_system=True,
+        )
         return {
-            "system": messages.system,
+            "system": system if system is not None else NOT_GIVEN,
             "messages": (
-                self._with_cache_control_markers(messages.messages)
+                self._with_cache_control_markers(converted.messages)
                 if enable_prompt_caching
-                else messages.messages
+                else converted.messages
             ),
             # NOTE: LLMContext's tools are guaranteed to be a ToolsSchema (or NOT_GIVEN)
             "tools": self.from_standard_tools(context.tools) or [],
         }
 
-    def get_messages_for_logging(self, context: LLMContext) -> List[Dict[str, Any]]:
+    def get_messages_for_logging(self, context: LLMContext) -> list[dict[str, Any]]:
         """Get messages from a universal LLM context in a format ready for logging about Anthropic.
 
         Removes or truncates sensitive data like image content for safe logging.
@@ -103,37 +138,38 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
     class ConvertedMessages:
         """Container for Anthropic-formatted messages converted from universal context."""
 
-        messages: List[MessageParam]
+        messages: list[MessageParam]
         system: str | NotGiven
 
     def _from_universal_context_messages(
-        self, universal_context_messages: List[LLMContextMessage]
+        self,
+        universal_context_messages: list[LLMContextMessage],
+        *,
+        system_instruction: str | None = None,
     ) -> ConvertedMessages:
         system = NOT_GIVEN
-        messages = []
 
-        # First, map messages using self._from_universal_context_message(m)
+        # Extract initial system message from universal messages BEFORE conversion,
+        # so the helper works with standard message format (not provider-specific).
+        remaining = list(universal_context_messages)
+        if remaining and not isinstance(remaining[0], LLMSpecificMessage):
+            extracted = self._extract_initial_system(
+                remaining, system_instruction=system_instruction
+            )
+            if extracted is not None:
+                system = extracted
+
+        # Convert remaining messages to Anthropic format
+        messages = []
         try:
-            messages = [self._from_universal_context_message(m) for m in universal_context_messages]
+            messages = [self._from_universal_context_message(m) for m in remaining]
         except Exception as e:
             logger.error(f"Error mapping messages: {e}")
 
-        # See if we should pull the system message out of our messages list.
-        if messages and messages[0]["role"] == "system":
-            if len(messages) == 1:
-                # If we have only have a system message in the list, all we can really do
-                # without introducing too much magic is change the role to "user".
-                messages[0]["role"] = "user"
-            else:
-                # If we have more than one message, we'll pull the system message out of the
-                # list.
-                system = messages[0]["content"]
-                messages.pop(0)
-
-        # Convert any subsequent "system"-role messages to "user"-role
-        # messages, as Anthropic doesn't support system input messages.
+        # Convert any subsequent "system"/"developer"-role messages to "user"-role
+        # messages, as Anthropic doesn't support system or developer input messages.
         for message in messages:
-            if message["role"] == "system":
+            if message["role"] in ("system", "developer"):
                 message["role"] = "user"
 
         # Merge consecutive messages with the same role.
@@ -320,7 +356,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
 
         return message
 
-    def _with_cache_control_markers(self, messages: List[MessageParam]) -> List[MessageParam]:
+    def _with_cache_control_markers(self, messages: list[MessageParam]) -> list[MessageParam]:
         """Add cache control markers to messages for prompt caching.
 
         Args:
@@ -368,7 +404,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
             return messages_with_markers
 
     @staticmethod
-    def _to_anthropic_function_format(function: FunctionSchema) -> Dict[str, Any]:
+    def _to_anthropic_function_format(function: FunctionSchema) -> dict[str, Any]:
         """Convert a single function schema to Anthropic's format.
 
         Args:
@@ -387,7 +423,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
             },
         }
 
-    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> List[Dict[str, Any]]:
+    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> list[dict[str, Any]]:
         """Convert function schemas to Anthropic's function-calling format.
 
         Args:

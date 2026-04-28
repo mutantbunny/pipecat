@@ -7,7 +7,6 @@
 """Cerebras LLM service implementation using OpenAI-compatible interface."""
 
 from dataclasses import dataclass
-from typing import Optional
 
 from loguru import logger
 
@@ -30,6 +29,10 @@ class CerebrasLLMService(OpenAILLMService):
     maintaining full compatibility with OpenAI's interface and functionality.
     """
 
+    # Cerebras doesn't support the "developer" message role.
+    # This value is used by BaseOpenAILLMService when calling the adapter.
+    supports_developer_role = False
+
     Settings = CerebrasLLMSettings
     _settings: Settings
 
@@ -38,8 +41,8 @@ class CerebrasLLMService(OpenAILLMService):
         *,
         api_key: str,
         base_url: str = "https://api.cerebras.ai/v1",
-        model: Optional[str] = None,
-        settings: Optional[Settings] = None,
+        model: str | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Cerebras LLM service.
@@ -113,16 +116,5 @@ class CerebrasLLMService(OpenAILLMService):
         params.update(params_from_context)
 
         params.update(self._settings.extra)
-
-        # Prepend system instruction if set
-        if self._settings.system_instruction:
-            messages = params.get("messages", [])
-            if messages and messages[0].get("role") == "system":
-                logger.warning(
-                    f"{self}: Both system_instruction and an initial system message in context are set. This may be unintended."
-                )
-            params["messages"] = [
-                {"role": "system", "content": self._settings.system_instruction}
-            ] + messages
 
         return params

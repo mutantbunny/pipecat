@@ -9,7 +9,7 @@
 import base64
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, TypedDict
 
 from loguru import logger
 from openai import NotGiven
@@ -34,9 +34,9 @@ except ModuleNotFoundError as e:
 class GeminiLLMInvocationParams(TypedDict):
     """Context-based parameters for invoking Gemini LLM."""
 
-    system_instruction: Optional[str]
-    messages: List[Content]
-    tools: List[Any] | NotGiven
+    system_instruction: str | None
+    messages: list[Content]
+    tools: list[Any] | NotGiven
 
 
 class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
@@ -53,24 +53,35 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
         """Get the identifier used in LLMSpecificMessage instances for Google."""
         return "google"
 
-    def get_llm_invocation_params(self, context: LLMContext) -> GeminiLLMInvocationParams:
+    def get_llm_invocation_params(
+        self, context: LLMContext, *, system_instruction: str | None = None
+    ) -> GeminiLLMInvocationParams:
         """Get Gemini-specific LLM invocation parameters from a universal LLM context.
 
         Args:
             context: The LLM context containing messages, tools, etc.
+            system_instruction: Optional system instruction from service settings
+                or ``run_inference``.
 
         Returns:
             Dictionary of parameters for Gemini's API.
         """
-        messages = self._from_universal_context_messages(self.get_messages(context))
+        converted = self._from_universal_context_messages(
+            self.get_messages(context), system_instruction=system_instruction
+        )
+        effective_system = self._resolve_system_instruction(
+            converted.system_instruction,
+            system_instruction,
+            discard_context_system=True,
+        )
         return {
-            "system_instruction": messages.system_instruction,
-            "messages": messages.messages,
+            "system_instruction": effective_system,
+            "messages": converted.messages,
             # NOTE: LLMContext's tools are guaranteed to be a ToolsSchema (or NOT_GIVEN)
             "tools": self.from_standard_tools(context.tools),
         }
 
-    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> List[Dict[str, Any]]:
+    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> list[dict[str, Any]]:
         """Convert tool schemas to Gemini's function-calling format.
 
         Args:
@@ -81,7 +92,7 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
             Includes both converted standard tools and any custom Gemini-specific tools.
         """
 
-        def _strip_additional_properties(schema: Dict[str, Any]) -> Dict[str, Any]:
+        def _strip_additional_properties(schema: dict[str, Any]) -> dict[str, Any]:
             """Recursively remove "additionalProperties" fields from JSON schema, as they're not supported by Gemini.
 
             Args:
@@ -128,7 +139,7 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
 
         return formatted_standard_tools + custom_gemini_tools
 
-    def get_messages_for_logging(self, context: LLMContext) -> List[Dict[str, Any]]:
+    def get_messages_for_logging(self, context: LLMContext) -> list[dict[str, Any]]:
         """Get messages from a universal LLM context in a format ready for logging about Gemini.
 
         Removes or truncates sensitive data like image content for safe logging.
@@ -162,59 +173,65 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
     class ConvertedMessages:
         """Container for Google-formatted messages converted from universal context."""
 
-        messages: List[Content]
-        system_instruction: Optional[str] = None
+        messages: list[Content]
+        system_instruction: str | None = None
 
     @dataclass
     class MessageConversionResult:
         """Result of converting a single universal context message to Google format.
 
-        Either content (a Google Content object) or a system instruction string
-        is guaranteed to be set.
-
-        Also returns a tool call ID to name mapping for any tool calls
-        discovered in the message.
+        Contains a Google Content object and a tool call ID to name mapping
+        for any tool calls discovered in the message.
         """
 
-        content: Optional[Content] = None
-        system_instruction: Optional[str] = None
-        tool_call_id_to_name_mapping: Dict[str, str] = field(default_factory=dict)
+        content: Content | None = None
+        tool_call_id_to_name_mapping: dict[str, str] = field(default_factory=dict)
 
     @dataclass
     class MessageConversionParams:
         """Parameters for converting a single universal context message to Google format."""
 
-        already_have_system_instruction: bool
-        tool_call_id_to_name_mapping: Dict[str, str]
+        tool_call_id_to_name_mapping: dict[str, str]
 
     def _from_universal_context_messages(
-        self, universal_context_messages: List[LLMContextMessage]
+        self,
+        universal_context_messages: list[LLMContextMessage],
+        *,
+        system_instruction: str | None = None,
     ) -> ConvertedMessages:
         """Restructures messages to ensure proper Google format and message ordering.
 
         This method handles conversion of OpenAI-formatted messages to Google format,
-        with special handling for function calls, function responses, and system messages.
-        System messages are added back to the context as user messages when needed.
+        with special handling for function calls, function responses, and system/developer
+        messages.
 
-        The final message order is preserved as:
+        Initial system/developer messages are extracted as the system instruction
+        (only from ``messages[0]``). Subsequent system/developer messages are
+        converted to user role.
 
-        1. Function calls (from model)
-        2. Function responses (from user)
-        3. Text messages (converted from system messages)
-
-        Note::
-
-            System messages are only added back when there are no regular text
-            messages in the context, ensuring proper conversation continuity
-            after function calls.
+        Args:
+            universal_context_messages: Messages from the LLM context.
+            system_instruction: Optional system instruction from service settings,
+                used to decide whether to extract an initial "developer" message.
         """
-        system_instruction = None
+        # Extract initial system/developer message from universal messages before conversion.
+        # We work on a mutable copy so we can pop messages[0] if needed.
+        remaining_messages = list(universal_context_messages)
+        extracted_system = None
+
+        # Extract initial system message from universal messages BEFORE conversion,
+        # so the helper works with standard message format.
+        if remaining_messages and not isinstance(remaining_messages[0], LLMSpecificMessage):
+            extracted_system = self._extract_initial_system(
+                remaining_messages, system_instruction=system_instruction
+            )
+
         messages = []
         tool_call_id_to_name_mapping = {}
         thought_signature_dicts = []
 
         # Process each message, converting to Google format as needed
-        for message in universal_context_messages:
+        for message in remaining_messages:
             # We have a Google-specific message; this may either be a
             # thought-signature-containing message that we need to handle in a
             # special way, or a message already in Google format that we can
@@ -237,16 +254,12 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
             result = self._from_standard_message(
                 message,
                 params=self.MessageConversionParams(
-                    already_have_system_instruction=bool(system_instruction),
                     tool_call_id_to_name_mapping=tool_call_id_to_name_mapping,
                 ),
             )
 
-            # Each result is either a Content or a system instruction
             if result.content:
                 messages.append(result.content)
-            elif result.system_instruction:
-                system_instruction = result.system_instruction
 
             # Merge tool call ID to name mapping
             if result.tool_call_id_to_name_mapping:
@@ -259,6 +272,7 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
         messages = self._merge_parallel_tool_calls_for_thinking(thought_signature_dicts, messages)
 
         # Check if we only have function-related messages (no regular text)
+        effective_system = extracted_system or system_instruction
         has_regular_messages = any(
             len(msg.parts) == 1
             and getattr(msg.parts[0], "text", None)
@@ -268,13 +282,16 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
         )
 
         # Add system instruction back as a user message if we only have function messages
-        if system_instruction and not has_regular_messages:
-            messages.append(Content(role="user", parts=[Part(text=system_instruction)]))
+        if effective_system and not has_regular_messages:
+            messages.append(Content(role="user", parts=[Part(text=effective_system)]))
 
         # Remove any empty messages
         messages = [m for m in messages if m.parts]
 
-        return self.ConvertedMessages(messages=messages, system_instruction=system_instruction)
+        return self.ConvertedMessages(
+            messages=messages,
+            system_instruction=extracted_system,
+        )
 
     def _from_standard_message(
         self, message: LLMStandardMessage, *, params: MessageConversionParams
@@ -282,17 +299,16 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
         """Convert standard universal context message to Google Content object.
 
         Handles conversion of text, images, and function calls to Google's
-        format.
-        System instructions are returned as a plain string.
+        format. System and developer messages at this stage (i.e. non-initial
+        ones, since the initial one is already extracted) are converted to
+        user role.
 
         Args:
             message: Message in standard universal context format.
-            already_have_system_instruction: Whether we already have a system instruction
             params: Parameters for conversion.
 
         Returns:
-            MessageConversionResult containing either a Content object or a
-            system instruction string.
+            MessageConversionResult containing a Content object.
 
         Examples:
             Standard text message::
@@ -333,20 +349,10 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
         role = message["role"]
         content = message.get("content", [])
 
-        if role == "system":
-            if params.already_have_system_instruction:
-                role = "user"  # Convert system message to user role if we already have a system instruction
-            else:
-                system_instruction: str = None
-                if isinstance(content, str):
-                    system_instruction = content
-                elif isinstance(content, list):
-                    # If content is a list, we assume it's a list of text parts, per the standard
-                    system_instruction = " ".join(
-                        part["text"] for part in content if part.get("type") == "text"
-                    )
-                if system_instruction:
-                    return self.MessageConversionResult(system_instruction=system_instruction)
+        # Convert non-initial system/developer messages to user role,
+        # as Gemini doesn't support these as input messages.
+        if role in ("system", "developer"):
+            role = "user"
         elif role == "assistant":
             role = "model"
 
@@ -437,8 +443,8 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
         )
 
     def _merge_parallel_tool_calls_for_thinking(
-        self, thought_signature_dicts: List[dict], messages: List[Content]
-    ) -> List[Content]:
+        self, thought_signature_dicts: list[dict], messages: list[Content]
+    ) -> list[Content]:
         """Merge parallel tool calls into single Content objects when thinking is enabled.
 
         Gemini expects parallel tool calls (multiple function calls made
@@ -534,7 +540,7 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
         return merged_messages
 
     def _apply_thought_signatures_to_messages(
-        self, thought_signature_dicts: List[dict], messages: List[Content]
+        self, thought_signature_dicts: list[dict], messages: list[Content]
     ) -> None:
         """Apply thought signatures to corresponding assistant messages.
 

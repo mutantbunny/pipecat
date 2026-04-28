@@ -7,7 +7,6 @@
 """OLLama LLM service implementation for Pipecat AI framework."""
 
 from dataclasses import dataclass
-from typing import Optional
 
 from loguru import logger
 
@@ -29,15 +28,20 @@ class OLLamaLLMService(OpenAILLMService):
     providing a compatible interface for running large language models locally.
     """
 
+    # OLLama doesn't support the "developer" message role (it seems to quietly
+    # ignore "developer" messages).
+    # This value is used by BaseOpenAILLMService when calling the adapter.
+    supports_developer_role = False
+
     Settings = OllamaLLMSettings
     _settings: Settings
 
     def __init__(
         self,
         *,
-        model: Optional[str] = None,
+        model: str | None = None,
         base_url: str = "http://localhost:11434/v1",
-        settings: Optional[Settings] = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize OLLama LLM service.

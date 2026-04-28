@@ -11,8 +11,9 @@ for generating speech from text using various voice models.
 """
 
 import json
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Optional
+from typing import Any
 
 import aiohttp
 from loguru import logger
@@ -65,11 +66,11 @@ class DeepgramTTSService(WebsocketTTSService):
         self,
         *,
         api_key: str,
-        voice: Optional[str] = None,
+        voice: str | None = None,
         base_url: str = "wss://api.deepgram.com",
-        sample_rate: Optional[int] = None,
+        sample_rate: int | None = None,
         encoding: str = "linear16",
-        settings: Optional[Settings] = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Deepgram WebSocket TTS service.
@@ -277,6 +278,7 @@ class DeepgramTTSService(WebsocketTTSService):
                 await self._websocket.send(json.dumps({"type": "Clear"}))
             except Exception as e:
                 logger.error(f"{self} error sending Clear message: {e}")
+        await super().on_audio_context_interrupted(context_id)
 
     async def _receive_messages(self):
         """Receive and process messages from Deepgram WebSocket."""
@@ -314,7 +316,7 @@ class DeepgramTTSService(WebsocketTTSService):
                 except json.JSONDecodeError:
                     logger.error(f"Invalid JSON message: {message}")
 
-    async def flush_audio(self, context_id: Optional[str] = None):
+    async def flush_audio(self, context_id: str | None = None):
         """Flush any pending audio synthesis by sending Flush command.
 
         This should be called when the LLM finishes a complete response to force
@@ -328,7 +330,7 @@ class DeepgramTTSService(WebsocketTTSService):
                 logger.error(f"{self} error sending Flush message: {e}")
 
     @traced_tts
-    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
         """Generate speech from text using Deepgram's WebSocket TTS API.
 
         Args:
@@ -373,12 +375,12 @@ class DeepgramHttpTTSService(TTSService):
         self,
         *,
         api_key: str,
-        voice: Optional[str] = None,
+        voice: str | None = None,
         aiohttp_session: aiohttp.ClientSession,
         base_url: str = "https://api.deepgram.com",
-        sample_rate: Optional[int] = None,
+        sample_rate: int | None = None,
         encoding: str = "linear16",
-        settings: Optional[Settings] = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Deepgram TTS service.
@@ -439,7 +441,7 @@ class DeepgramHttpTTSService(TTSService):
         return True
 
     @traced_tts
-    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
         """Generate speech from text using Deepgram's TTS API.
 
         Args:

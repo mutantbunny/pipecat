@@ -6,7 +6,7 @@
 
 """Service switcher for switching between different services at runtime, with different switching strategies."""
 
-from typing import Any, Generic, List, Optional, Type, TypeVar
+from typing import Any, Generic, TypeVar
 
 from loguru import logger
 
@@ -42,7 +42,7 @@ class ServiceSwitcherStrategy(BaseObject):
             ...
     """
 
-    def __init__(self, services: List[FrameProcessor]):
+    def __init__(self, services: list[FrameProcessor]):
         """Initialize the service switcher strategy with a list of services.
 
         Note:
@@ -62,7 +62,7 @@ class ServiceSwitcherStrategy(BaseObject):
         self._register_event_handler("on_service_switched")
 
     @property
-    def services(self) -> List[FrameProcessor]:
+    def services(self) -> list[FrameProcessor]:
         """Return the list of available services."""
         return self._services
 
@@ -73,7 +73,7 @@ class ServiceSwitcherStrategy(BaseObject):
 
     async def handle_frame(
         self, frame: ServiceSwitcherFrame, direction: FrameDirection
-    ) -> Optional[FrameProcessor]:
+    ) -> FrameProcessor | None:
         """Handle a frame that controls service switching.
 
         The base implementation returns ``None`` for all frames. Subclasses
@@ -88,7 +88,7 @@ class ServiceSwitcherStrategy(BaseObject):
         """
         return None
 
-    async def handle_error(self, error: ErrorFrame) -> Optional[FrameProcessor]:
+    async def handle_error(self, error: ErrorFrame) -> FrameProcessor | None:
         """Handle an error from the active service.
 
         Called by ``ServiceSwitcher`` when a non-fatal ``ErrorFrame`` is pushed
@@ -103,7 +103,7 @@ class ServiceSwitcherStrategy(BaseObject):
         """
         return None
 
-    async def _set_active_if_available(self, service: FrameProcessor) -> Optional[FrameProcessor]:
+    async def _set_active_if_available(self, service: FrameProcessor) -> FrameProcessor | None:
         """Set the active service to the given one, if it is in the list of available services.
 
         If it's not in the list, the request is ignored, as it may have been
@@ -139,7 +139,7 @@ class ServiceSwitcherStrategyManual(ServiceSwitcherStrategy):
 
     async def handle_frame(
         self, frame: ServiceSwitcherFrame, direction: FrameDirection
-    ) -> Optional[FrameProcessor]:
+    ) -> FrameProcessor | None:
         """Handle a frame that controls service switching.
 
         Args:
@@ -179,7 +179,7 @@ class ServiceSwitcherStrategyFailover(ServiceSwitcherStrategyManual):
             ...
     """
 
-    async def handle_error(self, error: ErrorFrame) -> Optional[FrameProcessor]:
+    async def handle_error(self, error: ErrorFrame) -> FrameProcessor | None:
         """Handle an error from the active service by failing over.
 
         Switches to the next service in the list. The failed service remains
@@ -193,7 +193,8 @@ class ServiceSwitcherStrategyFailover(ServiceSwitcherStrategyManual):
             The newly active service if a switch occurred, or None if no
             other service is available.
         """
-        logger.warning(f"Service {self._active_service.name} reported an error: {error.error}")
+        service_name = error.processor.name if error.processor else self._active_service.name
+        logger.warning(f"Service {service_name} reported an error: {error.error}")
 
         if len(self._services) <= 1:
             logger.error("No other service available to switch to")
@@ -222,8 +223,8 @@ class ServiceSwitcher(ParallelPipeline, Generic[StrategyType]):
 
     def __init__(
         self,
-        services: List[FrameProcessor],
-        strategy_type: Type[StrategyType] = ServiceSwitcherStrategyManual,
+        services: list[FrameProcessor],
+        strategy_type: type[StrategyType] = ServiceSwitcherStrategyManual,
     ):
         """Initialize the service switcher with a list of services and a switching strategy.
 
@@ -243,14 +244,14 @@ class ServiceSwitcher(ParallelPipeline, Generic[StrategyType]):
         return self._strategy
 
     @property
-    def services(self) -> List[FrameProcessor]:
+    def services(self) -> list[FrameProcessor]:
         """Return the list of available services."""
         return self._services
 
     @staticmethod
     def _make_pipeline_definitions(
-        services: List[FrameProcessor], strategy: ServiceSwitcherStrategy
-    ) -> List[Any]:
+        services: list[FrameProcessor], strategy: ServiceSwitcherStrategy
+    ) -> list[Any]:
         pipelines = []
         for service in services:
             pipelines.append(ServiceSwitcher._make_pipeline_definition(service, strategy))
@@ -312,9 +313,11 @@ class ServiceSwitcher(ParallelPipeline, Generic[StrategyType]):
             if frame.service_name != self.strategy.active_service.name:
                 return
 
-        # Let the strategy react to non-fatal errors from the active service.
+        # Let the strategy react to non-fatal errors from the active service,
+        # ignoring errors just propagating upstream from other processors.
         if isinstance(frame, ErrorFrame) and not frame.fatal:
-            await self.strategy.handle_error(frame)
+            if frame.processor and frame.processor == self.strategy.active_service:
+                await self.strategy.handle_error(frame)
 
         await super().push_frame(frame, direction)
 

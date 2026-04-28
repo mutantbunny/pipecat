@@ -13,8 +13,9 @@ text-to-speech API for real-time audio synthesis.
 import asyncio
 import base64
 import json
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Optional
+from typing import Any
 
 import aiohttp
 from loguru import logger
@@ -43,7 +44,7 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
-def language_to_neuphonic_lang_code(language: Language) -> Optional[str]:
+def language_to_neuphonic_lang_code(language: Language) -> str | None:
     """Convert a Language enum to Neuphonic language code.
 
     Args:
@@ -101,21 +102,21 @@ class NeuphonicTTSService(InterruptibleTTSService):
             speed: Speech speed multiplier. Defaults to 1.0.
         """
 
-        language: Optional[Language] = Language.EN
-        speed: Optional[float] = 1.0
+        language: Language | None = Language.EN
+        speed: float | None = 1.0
 
     def __init__(
         self,
         *,
         api_key: str,
-        voice_id: Optional[str] = None,
+        voice_id: str | None = None,
         url: str = "wss://api.neuphonic.com",
-        sample_rate: Optional[int] = 22050,
+        sample_rate: int | None = 22050,
         encoding: str = "pcm_linear",
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
-        aggregate_sentences: Optional[bool] = None,
-        text_aggregation_mode: Optional[TextAggregationMode] = None,
+        params: InputParams | None = None,
+        settings: Settings | None = None,
+        aggregate_sentences: bool | None = None,
+        text_aggregation_mode: TextAggregationMode | None = None,
         **kwargs,
     ):
         """Initialize the Neuphonic TTS service.
@@ -177,7 +178,6 @@ class NeuphonicTTSService(InterruptibleTTSService):
             push_stop_frames=True,
             push_start_frame=True,
             pause_frame_processing=True,
-            stop_frame_timeout_s=2.0,
             sample_rate=sample_rate,
             settings=default_settings,
             **kwargs,
@@ -198,7 +198,7 @@ class NeuphonicTTSService(InterruptibleTTSService):
         """
         return True
 
-    def language_to_service_language(self, language: Language) -> Optional[str]:
+    def language_to_service_language(self, language: Language) -> str | None:
         """Convert a Language enum to Neuphonic service language format.
 
         Args:
@@ -245,7 +245,7 @@ class NeuphonicTTSService(InterruptibleTTSService):
         await super().cancel(frame)
         await self._disconnect()
 
-    async def flush_audio(self, context_id: Optional[str] = None):
+    async def flush_audio(self, context_id: str | None = None):
         """Flush any pending audio synthesis by sending stop command."""
         if self._websocket:
             msg = {"text": "<STOP>"}
@@ -366,7 +366,7 @@ class NeuphonicTTSService(InterruptibleTTSService):
             await self._websocket.send(json.dumps(msg))
 
     @traced_tts
-    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
         """Generate speech from text using Neuphonic's streaming API.
 
         Args:
@@ -418,20 +418,20 @@ class NeuphonicHttpTTSService(TTSService):
             speed: Speech speed multiplier. Defaults to 1.0.
         """
 
-        language: Optional[Language] = Language.EN
-        speed: Optional[float] = 1.0
+        language: Language | None = Language.EN
+        speed: float | None = 1.0
 
     def __init__(
         self,
         *,
         api_key: str,
-        voice_id: Optional[str] = None,
+        voice_id: str | None = None,
         aiohttp_session: aiohttp.ClientSession,
         url: str = "https://api.neuphonic.com",
-        sample_rate: Optional[int] = 22050,
-        encoding: Optional[str] = "pcm_linear",
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
+        sample_rate: int | None = 22050,
+        encoding: str | None = "pcm_linear",
+        params: InputParams | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Neuphonic HTTP TTS service.
@@ -503,7 +503,7 @@ class NeuphonicHttpTTSService(TTSService):
         """
         return True
 
-    def language_to_service_language(self, language: Language) -> Optional[str]:
+    def language_to_service_language(self, language: Language) -> str | None:
         """Convert a Language enum to Neuphonic service language format.
 
         Args:
@@ -522,7 +522,7 @@ class NeuphonicHttpTTSService(TTSService):
         """
         await super().start(frame)
 
-    async def flush_audio(self, context_id: Optional[str] = None):
+    async def flush_audio(self, context_id: str | None = None):
         """Flush any pending audio synthesis.
 
         Note:
@@ -565,7 +565,7 @@ class NeuphonicHttpTTSService(TTSService):
             return None
 
     @traced_tts
-    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
         """Generate speech from text using Neuphonic streaming API.
 
         Args:
