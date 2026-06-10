@@ -448,6 +448,9 @@ class BaseOutputTransport(FrameProcessor):
             self._video_task: asyncio.Task | None = None
             self._clock_task: asyncio.Task | None = None
 
+            # If timestamps are equal, use this count to preserve the insertion order
+            self._clock_queue_counter = itertools.count()
+
         @property
         def sample_rate(self) -> int:
             """Get the audio sample rate.
@@ -498,7 +501,7 @@ class BaseOutputTransport(FrameProcessor):
                 frame: The end frame signaling sender shutdown.
             """
             # Let the sink tasks process the queue until they reach this EndFrame.
-            await self._clock_queue.put((float("inf"), frame.id, frame))
+            await self._clock_queue.put((float("inf"), next(self._clock_queue_counter), frame))
             await self._audio_queue.put(frame)
 
             # At this point we have enqueued an EndFrame and we need to wait for
@@ -610,7 +613,7 @@ class BaseOutputTransport(FrameProcessor):
             Args:
                 frame: The frame with timing information to handle.
             """
-            await self._clock_queue.put((frame.pts, frame.id, frame))
+            await self._clock_queue.put((frame.pts, next(self._clock_queue_counter), frame))
 
         async def handle_sync_frame(self, frame: Frame):
             """Handle frames that need synchronized processing.
@@ -771,13 +774,16 @@ class BaseOutputTransport(FrameProcessor):
                         await self._bot_stopped_speaking()
 
             async def with_mixer(vad_stop_secs: float) -> AsyncGenerator[Frame, None]:
+                # Caller below only invokes this when `self._mixer` is set.
+                mixer = self._mixer
+                assert mixer is not None
                 last_frame_time = 0
                 silence = b"\x00" * self._audio_chunk_size
                 while True:
                     try:
                         frame = self._audio_queue.get_nowait()
                         if isinstance(frame, OutputAudioRawFrame):
-                            frame.audio = await self._mixer.mix(frame.audio)
+                            frame.audio = await mixer.mix(frame.audio)
                             last_frame_time = time.time()
                         yield frame
                         self._audio_queue.task_done()
@@ -788,7 +794,7 @@ class BaseOutputTransport(FrameProcessor):
                             await self._bot_stopped_speaking()
                         # Generate an audio frame with only the mixer's part.
                         frame = OutputAudioRawFrame(
-                            audio=await self._mixer.mix(silence),
+                            audio=await mixer.mix(silence),
                             sample_rate=self._sample_rate,
                             num_channels=self._params.audio_out_channels,
                         )
@@ -927,6 +933,11 @@ class BaseOutputTransport(FrameProcessor):
             """
 
             def resize_frame(frame: OutputImageRawFrame) -> OutputImageRawFrame:
+                # Without a format we can't decode the bytes, so leave the
+                # frame as-is and let the transport pass it through unchanged.
+                if frame.format is None:
+                    return frame
+
                 desired_size = (self._params.video_out_width, self._params.video_out_height)
 
                 # TODO: we should refactor in the future to support dynamic resolutions

@@ -42,7 +42,7 @@ class WebsocketService(ABC):
             reconnect_on_error: Whether to automatically reconnect on connection errors.
             **kwargs: Additional arguments (unused, for compatibility).
         """
-        self._websocket: websockets.WebSocketClientProtocol | None = None
+        self._websocket: websockets.WebSocketClientProtocol | None = None  # pyright: ignore[reportAttributeAccessIssue]
         self._reconnect_on_error = reconnect_on_error
         self._reconnect_in_progress: bool = False
         self._disconnecting: bool = False
@@ -76,7 +76,9 @@ class WebsocketService(ABC):
         logger.warning(f"{self} reconnecting (attempt: {attempt_number})")
         await self._disconnect_websocket()
         await self._connect_websocket()
-        return await self._verify_connection()
+        if not await self._verify_connection():
+            raise ConnectionError(f"{self} websocket reconnection failed verification")
+        return True
 
     async def _try_reconnect(
         self,
@@ -120,12 +122,17 @@ class WebsocketService(ABC):
     async def send_with_retry(self, message, report_error: Callable[[ErrorFrame], Awaitable[None]]):
         """Attempt to send a message, retrying after reconnect if necessary."""
         try:
+            # If websocket isn't connected/present, treat as a send failure —
+            # the broad `except Exception` below will trigger a reconnect
+            # attempt.
+            if self._websocket is None:
+                raise ConnectionError(f"{self} no websocket connected")
             await self._websocket.send(message)
         except Exception as e:
             logger.error(f"{self} send failed: {e}, will try to reconnect")
             # Try to reconnect before retrying
             success = await self._try_reconnect(report_error=report_error)
-            if success:
+            if success and self._websocket is not None:
                 logger.info(f"{self} reconnected successfully, will retry send the message")
                 # trying to send the message one more time
                 await self._websocket.send(message)

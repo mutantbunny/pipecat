@@ -15,6 +15,7 @@ from typing import Any
 
 from loguru import logger
 
+from pipecat.adapters.services.open_ai_adapter import OpenAILLMInvocationParams
 from pipecat.services.openai.base_llm import BaseOpenAILLMService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.settings import assert_given
@@ -36,6 +37,7 @@ class OpenRouterLLMService(OpenAILLMService):
 
     Settings = OpenRouterLLMSettings
     _settings: Settings
+    supports_developer_role = False
 
     def __init__(
         self,
@@ -51,7 +53,7 @@ class OpenRouterLLMService(OpenAILLMService):
         Args:
             api_key: The API key for accessing OpenRouter's API. If None, will attempt
                 to read from environment variables.
-            model: The model identifier to use. Defaults to "openai/gpt-4o-2024-11-20".
+            model: The model identifier to use. Defaults to "openai/gpt-4.1".
 
                 .. deprecated:: 0.0.105
                     Use ``settings=OpenRouterLLMService.Settings(model=...)`` instead.
@@ -62,7 +64,7 @@ class OpenRouterLLMService(OpenAILLMService):
             **kwargs: Additional keyword arguments passed to OpenAILLMService.
         """
         # 1. Initialize default_settings with hardcoded defaults
-        default_settings = self.Settings(model="openai/gpt-4o-2024-11-20")
+        default_settings = self.Settings(model="openai/gpt-4.1")
 
         # 2. Apply direct init arg overrides (deprecated)
         if model is not None:
@@ -96,7 +98,9 @@ class OpenRouterLLMService(OpenAILLMService):
         logger.debug(f"Creating OpenRouter client with api {base_url}")
         return super().create_client(api_key, base_url, **kwargs)
 
-    def build_chat_completion_params(self, params_from_context: dict[str, Any]) -> dict[str, Any]:
+    def build_chat_completion_params(
+        self, params_from_context: OpenAILLMInvocationParams
+    ) -> dict[str, Any]:
         """Builds chat parameters, handling model-specific constraints.
 
         Args:

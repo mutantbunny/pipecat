@@ -46,7 +46,7 @@ try:
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use HeyGen, you need to `pip install pipecat-ai[heygen]`.")
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 HEY_GEN_SAMPLE_RATE = 24000
 
@@ -291,6 +291,8 @@ class HeyGenClient:
         """Handle incoming WebSocket messages."""
         try:
             while self._connected:
+                if self._websocket is None:  # should never happen while _connected is True
+                    break
                 try:
                     message = await self._websocket.recv()
                     parsed_message = json.loads(message)

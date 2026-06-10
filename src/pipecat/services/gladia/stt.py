@@ -53,17 +53,20 @@ try:
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use Gladia, you need to `pip install pipecat-ai[gladia]`.")
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 
-def language_to_gladia_language(language: Language) -> str | None:
+def language_to_gladia_language(language: Language) -> str:
     """Convert a Language enum to Gladia's language code format.
 
     Args:
         language: The Language enum value to convert.
 
     Returns:
-        The Gladia language code string or None if not supported.
+        The corresponding Gladia language code. If ``language`` is not in
+        the verified mapping, falls back to the base language code (e.g.,
+        ``en`` from ``en-US``) and logs a warning (via
+        ``resolve_language(..., use_base_code=True)``).
     """
     LANGUAGE_MAP = {
         Language.AF: "af",
@@ -361,7 +364,7 @@ class GladiaSTTService(WebsocketSTTService):
             language: The Language enum value to convert.
 
         Returns:
-            The Gladia language code string or None if not supported.
+            The Gladia language code string, or None if not supported.
         """
         return language_to_gladia_language(language)
 
@@ -539,6 +542,8 @@ class GladiaSTTService(WebsocketSTTService):
 
             logger.debug(f"{self}Connecting to Gladia WebSocket")
 
+            if self._session_url is None:
+                raise RuntimeError(f"{self} session URL is not initialized")
             self._websocket = await websocket_connect(self._session_url)
             self._connection_active = True
 
@@ -553,8 +558,9 @@ class GladiaSTTService(WebsocketSTTService):
 
             logger.debug(f"{self} Connected to Gladia WebSocket")
         except Exception as e:
+            self._websocket = None
+            self._connection_active = False
             await self.push_error(error_msg=f"Unable to connect to Gladia: {e}", exception=e)
-            raise
 
     async def _disconnect_websocket(self):
         """Close the websocket connection to Gladia."""

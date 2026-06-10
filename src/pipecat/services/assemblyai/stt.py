@@ -55,7 +55,7 @@ try:
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error('In order to use AssemblyAI, you need to `pip install "pipecat-ai[assemblyai]"`.')
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 
 def map_language_from_assemblyai(language_code: str) -> Language:
@@ -233,10 +233,11 @@ class AssemblyAISTTService(WebsocketSTTService):
                 sample_rate = connection_params.sample_rate
                 encoding = connection_params.encoding
                 default_settings.model = connection_params.speech_model
-                default_settings.formatted_finals = connection_params.formatted_finals
-                default_settings.word_finalization_max_wait_time = (
-                    connection_params.word_finalization_max_wait_time
-                )
+                # Note: `formatted_finals` and `word_finalization_max_wait_time`
+                # were added to Settings after this deprecated input model
+                # was frozen and have no equivalent on
+                # AssemblyAIConnectionParams; they are only configurable via
+                # the canonical `settings=...` API.
                 default_settings.end_of_turn_confidence_threshold = (
                     connection_params.end_of_turn_confidence_threshold
                 )
@@ -585,9 +586,9 @@ class AssemblyAISTTService(WebsocketSTTService):
             await self._call_event_handler("on_connected")
             logger.debug(f"{self} Connected to AssemblyAI WebSocket")
         except Exception as e:
+            self._websocket = None
             self._connected = False
             await self.push_error(error_msg=f"Unable to connect to AssemblyAI: {e}", exception=e)
-            raise
 
     async def _disconnect_websocket(self):
         """Close the websocket connection to AssemblyAI."""

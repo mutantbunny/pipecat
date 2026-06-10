@@ -30,7 +30,7 @@ try:
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use Piper, you need to `pip install pipecat-ai[piper]`.")
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 
 @dataclass
@@ -101,6 +101,8 @@ class PiperTTSService(TTSService):
         download_dir = download_dir or Path.cwd()
 
         _voice = assert_given(self._settings.voice)
+        if _voice is None:
+            raise ValueError("Piper TTS voice must be specified")
         model_file = f"{_voice}.onnx"
         model_path_resolved = Path(download_dir) / model_file
 
