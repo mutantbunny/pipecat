@@ -160,6 +160,11 @@ class AsteriskWSServerInputTransport(BaseInputTransport):
             await self.cancel_task(self._session_timer_task)
             self._session_timer_task = None
 
+        if not gracefully and self._websocket:
+            logger.info(f"{self} closing client websocket connection on non-graceful terminate")
+            await self._websocket.close()
+            self._websocket = None
+
         if gracefully:
             # Will cause the server to exit the context manager and stop. Effectively it will return from _server_task_handler after closing all connections properly.
             self._stop_server_event.set()
@@ -675,6 +680,11 @@ class AsteriskWSServerOutputTransport(BaseOutputTransport):
         if self._buffer_state_monitor_task:
             await self.cancel_task(self._buffer_state_monitor_task)
             self._buffer_state_monitor_task = None
+
+        if self._websocket:
+            logger.info(f"{self} closing client websocket connection (graceful={gracefully})")
+            await self._websocket.close()
+            self._websocket = None
 
 class AsteriskWSServerTransport(BaseTransport):
     """WebSocket server transport for bidirectional real-time communication.
