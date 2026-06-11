@@ -669,8 +669,12 @@ class AsteriskWSServerOutputTransport(BaseOutputTransport):
         """
         if gracefully:
             # Wait till local audio buffer is empty and remote audio buffer is empty
-            while not self._audio_buffer.empty() or self._remote_audio_buffer_bytes > 0:
-                await asyncio.sleep(0.02)  # Avoid busy waiting
+            try:
+                async with asyncio.timeout(5.0):
+                    while not self._audio_buffer.empty() or self._remote_audio_buffer_bytes > 0:
+                        await asyncio.sleep(0.02)  # Avoid busy waiting
+            except TimeoutError:
+                logger.warning(f"{self} graceful shutdown timed out; forcing close")
         else:
             # stop the buffers immediately
             await self._flush_buffers()
