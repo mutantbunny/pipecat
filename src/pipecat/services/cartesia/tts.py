@@ -6,6 +6,7 @@
 
 """Cartesia text-to-speech service implementations."""
 
+import asyncio
 import base64
 import json
 import re
@@ -571,10 +572,26 @@ class CartesiaTTSService(WebsocketTTSService):
             if self._websocket and self._websocket.state is State.OPEN:
                 return
             logger.debug("Connecting to Cartesia TTS")
-            self._websocket = await websocket_connect(
-                f"{self._url}?api_key={self._api_key}&cartesia_version={self._cartesia_version}"
-            )
-            await self._call_event_handler("on_connected")
+            
+            # Use smaller open_timeout (3.0s) and retry up to 3 times to handle
+            # intermittent Cartesia WebSocket handshake timeouts.
+            max_retries = 3
+            timeout = 3.0
+            for attempt in range(1, max_retries + 1):
+                try:
+                    self._websocket = await websocket_connect(
+                        f"{self._url}?api_key={self._api_key}&cartesia_version={self._cartesia_version}",
+                        open_timeout=timeout
+                    )
+                    await self._call_event_handler("on_connected")
+                    logger.info(f"Successfully connected to Cartesia TTS on attempt {attempt}")
+                    return
+                except Exception as e:
+                    logger.warning(f"Cartesia TTS connection attempt {attempt} failed: {e}")
+                    self._websocket = None
+                    if attempt == max_retries:
+                        raise e
+                    await asyncio.sleep(0.5)
         except Exception as e:
             await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
             self._websocket = None
